@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phigros 难度定数预测系统 v4</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; background: #0f0f14; color: #e0e0e8; min-height: 100vh; }
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+header { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); padding: 28px 32px; border-radius: 16px; margin-bottom: 28px; border: 1px solid #2a2a4a; }
+header h1 { font-size: 26px; font-weight: 700; background: linear-gradient(90deg, #e94560, #0f3460, #16a085); background-size: 200%; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: grad 4s ease infinite; }
+@keyframes grad { 0%,100%{background-position:0%} 50%{background-position:100%} }
+header p { color: #888; margin-top: 6px; font-size: 14px; }
+header .badge { display: inline-block; background: #e94560; color: #fff; font-size: 11px; padding: 2px 10px; border-radius: 10px; margin-left: 10px; vertical-align: middle; -webkit-text-fill-color: #fff; }
+
+/* Drop zone */
+.drop-zone { border: 2px dashed #333; border-radius: 16px; padding: 48px 24px; text-align: center; transition: all 0.3s; cursor: pointer; background: #1a1a24; margin-bottom: 20px; }
+.drop-zone:hover, .drop-zone.dragover { border-color: #e94560; background: #1e1a2e; }
+.drop-zone .icon { font-size: 48px; margin-bottom: 12px; }
+.drop-zone .hint { color: #666; font-size: 14px; margin-top: 8px; }
+.btn { display: inline-block; padding: 10px 28px; border-radius: 8px; border: none; cursor: pointer; font-size: 15px; font-weight: 600; transition: all 0.2s; }
+.btn-primary { background: #e94560; color: #fff; }
+.btn-primary:hover { background: #d63851; transform: translateY(-1px); }
+.btn-primary:disabled { background: #553; color: #666; cursor: not-allowed; transform: none; }
+.btn-secondary { background: #2a2a3e; color: #ccc; }
+.btn-secondary:hover { background: #3a3a4e; }
+
+/* File list */
+.file-list { margin: 12px 0; }
+.file-item { display: flex; align-items: center; padding: 8px 14px; background: #1e1e2e; border-radius: 8px; margin-bottom: 6px; gap: 10px; }
+.file-item .name { flex: 1; font-size: 13px; }
+.file-item .size { color: #666; font-size: 12px; }
+.file-item .remove { color: #e94560; cursor: pointer; font-size: 18px; line-height: 1; }
+
+.action-bar { display: flex; gap: 12px; align-items: center; margin: 16px 0 24px; }
+
+/* Stats */
+.stats { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+.stat-card { background: #1a1a24; border-radius: 12px; padding: 16px 20px; flex: 1; min-width: 140px; border: 1px solid #2a2a3a; }
+.stat-card .label { font-size: 12px; color: #666; }
+.stat-card .value { font-size: 24px; font-weight: 700; color: #fff; margin-top: 4px; }
+
+/* Results table */
+.result-card { background: #1a1a24; border-radius: 12px; border: 1px solid #2a2a3a; margin-bottom: 16px; overflow: hidden; }
+.result-header { display: grid; grid-template-columns: 1fr auto auto; gap: 16px; padding: 16px 20px; cursor: pointer; align-items: center; transition: background 0.2s; }
+.result-header:hover { background: #22223a; }
+.result-header .song-info .name { font-size: 16px; font-weight: 600; }
+.result-header .song-info .meta { font-size: 12px; color: #777; margin-top: 2px; }
+.result-header .pred { text-align: center; }
+.result-header .pred .value { font-size: 28px; font-weight: 700; }
+.result-header .pred .label { font-size: 11px; color: #666; }
+.result-header .pred .gb-label { font-size: 11px; color: #555; }
+.result-header .expand { color: #555; font-size: 12px; }
+
+.result-detail { display: none; padding: 0 20px 20px; border-top: 1px solid #2a2a3a; }
+.result-detail.open { display: block; }
+
+/* Feature table */
+.feature-table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+.feature-table th { text-align: left; padding: 8px 12px; color: #888; font-weight: 500; border-bottom: 1px solid #2a2a3a; }
+.feature-table td { padding: 6px 12px; border-bottom: 1px solid #1e1e2e; }
+.feature-table .bar-cell { display: flex; align-items: center; gap: 8px; }
+.feature-table .bar-cell .bar { height: 6px; border-radius: 3px; min-width: 4px; transition: width 0.5s; }
+
+.loading { text-align: center; padding: 40px; color: #666; }
+.loading .spinner { display: inline-block; width: 32px; height: 32px; border: 3px solid #333; border-top-color: #e94560; border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-msg { background: #2e1a1a; border: 1px solid #e94560; border-radius: 8px; padding: 12px 16px; color: #e94560; margin: 8px 0; font-size: 13px; }
+
+/* Chart info row */
+.chart-info-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 12px 0; }
+.chart-info-item { background: #1e1e2e; border-radius: 8px; padding: 8px 12px; }
+.chart-info-item .label { font-size: 11px; color: #666; }
+.chart-info-item .value { font-size: 14px; font-weight: 600; margin-top: 2px; }
+
+/* Responsive */
+@media (max-width: 768px) {
+    .result-header { grid-template-columns: 1fr auto; }
+    .container { padding: 12px; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <h1>Phigros 难度定数预测 <span class="badge">v4</span></h1>
+        <p>5大类别(密度/1smax密度/位移/耐力/读谱) · 支持官谱/自制谱(RPE) · 批量上传</p>
+    </header>
+
+    <div class="drop-zone" id="dropZone">
+        <div class="icon">&#x1F4C2;</div>
+        <div style="font-size:16px;font-weight:600;">拖拽谱面文件到此处</div>
+        <div class="hint">支持 .json (官谱/RPE) 和 .zip 压缩包，可批量上传</div>
+        <input type="file" id="fileInput" multiple accept=".json,.zip" style="display:none">
+        <div style="margin-top:16px"><button class="btn btn-secondary" onclick="document.getElementById('fileInput').click()">或点击选择文件</button></div>
+    </div>
+
+    <div id="fileListContainer"></div>
+
+    <div class="action-bar">
+        <button class="btn btn-primary" id="predictBtn" onclick="doPredict()" disabled>开始预测</button>
+        <button class="btn btn-secondary" onclick="clearAll()">清空</button>
+        <span id="fileCount" style="color:#666;font-size:13px;"></span>
+    </div>
+
+    <div id="statsContainer"></div>
+    <div id="resultsContainer"></div>
+    <div id="loadingContainer"></div>
+    <div id="errorContainer"></div>
+</div>
+
+<script>
+let uploadedFiles = [];
+
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('dragover'); handleFiles(e.dataTransfer.files); });
+fileInput.addEventListener('change', () => { handleFiles(fileInput.files); fileInput.value = ''; });
+
+function handleFiles(files) {
+    for (const f of files) {
+        const name = f.name.toLowerCase();
+        if (name.endsWith('.json') || name.endsWith('.zip')) {
+            if (!uploadedFiles.some(x => x.name === f.name && x.size === f.size)) {
+                uploadedFiles.push(f);
+            }
+        }
+    }
+    renderFileList();
+}
+
+function renderFileList() {
+    const container = document.getElementById('fileListContainer');
+    const btn = document.getElementById('predictBtn');
+    const count = document.getElementById('fileCount');
+
+    if (uploadedFiles.length === 0) {
+        container.innerHTML = '';
+        btn.disabled = true;
+        count.textContent = '';
+        return;
+    }
+
+    let html = '<div class="file-list">';
+    uploadedFiles.forEach((f, idx) => {
+        const size = f.size > 1024*1024 ? (f.size/1024/1024).toFixed(1)+'MB' : (f.size/1024).toFixed(1)+'KB';
+        html += `<div class="file-item"><span class="name">${f.name}</span><span class="size">${size}</span><span class="remove" onclick="removeFile(${idx})">&times;</span></div>`;
+    });
+    html += '</div>';
+    container.innerHTML = html;
+    btn.disabled = false;
+    count.textContent = `${uploadedFiles.length} 个文件`;
+}
+
+function removeFile(idx) {
+    uploadedFiles.splice(idx, 1);
+    renderFileList();
+}
+
+function clearAll() {
+    uploadedFiles = [];
+    document.getElementById('fileListContainer').innerHTML = '';
+    document.getElementById('statsContainer').innerHTML = '';
+    document.getElementById('resultsContainer').innerHTML = '';
+    document.getElementById('loadingContainer').innerHTML = '';
+    document.getElementById('errorContainer').innerHTML = '';
+    document.getElementById('predictBtn').disabled = true;
+    document.getElementById('fileCount').textContent = '';
+}
+
+async function doPredict() {
+    if (uploadedFiles.length === 0) return;
+
+    const btn = document.getElementById('predictBtn');
+    btn.disabled = true;
+    btn.textContent = '预测中...';
+
+    document.getElementById('resultsContainer').innerHTML = '';
+    document.getElementById('statsContainer').innerHTML = '';
+    document.getElementById('errorContainer').innerHTML = '';
+    document.getElementById('loadingContainer').innerHTML = '<div class="loading"><div class="spinner"></div><div>正在分析谱面特征...</div></div>';
+
+    const formData = new FormData();
+    uploadedFiles.forEach(f => formData.append('files[]', f));
+
+    try {
+        const resp = await fetch('/predict', { method: 'POST', body: formData });
+        const data = await resp.json();
+
+        document.getElementById('loadingContainer').innerHTML = '';
+
+        if (data.errors && data.errors.length > 0) {
+            let errHtml = '';
+            data.errors.forEach(e => {
+                errHtml += `<div class="error-msg">${e.file}: ${e.error}</div>`;
+            });
+            document.getElementById('errorContainer').innerHTML = errHtml;
+        }
+
+        if (data.results && data.results.length > 0) {
+            renderStats(data.results);
+            renderResults(data.results);
+        } else {
+            document.getElementById('resultsContainer').innerHTML = '<div style="text-align:center;padding:40px;color:#666;">没有成功解析的谱面</div>';
+        }
+    } catch (err) {
+        document.getElementById('loadingContainer').innerHTML = '';
+        document.getElementById('errorContainer').innerHTML = `<div class="error-msg">请求失败: ${err.message}</div>`;
+    }
+
+    btn.disabled = false;
+    btn.textContent = '开始预测';
+}
+
+function renderStats(results) {
+    const avg = results.reduce((s, r) => s + r.prediction, 0) / results.length;
+    const max = Math.max(...results.map(r => r.prediction));
+    const min = Math.min(...results.map(r => r.prediction));
+
+    document.getElementById('statsContainer').innerHTML = `
+        <div class="stats">
+            <div class="stat-card"><div class="label">预测谱面数</div><div class="value">${results.length}</div></div>
+            <div class="stat-card"><div class="label">最高定数</div><div class="value" style="color:#e94560">${max.toFixed(2)}</div></div>
+            <div class="stat-card"><div class="label">最低定数</div><div class="value" style="color:#2ecc71">${min.toFixed(2)}</div></div>
+            <div class="stat-card"><div class="label">平均定数</div><div class="value">${avg.toFixed(2)}</div></div>
+        </div>`;
+}
+
+function renderResults(results) {
+    // Category colors
+    const catColors = { '密度': '#4ecdc4', '1smax密度': '#45b7d1', '平均位移': '#f9ca24', '耐力': '#e94560', '读谱': '#a29bfe' };
+    
+    let html = '';
+    results.forEach((r, idx) => {
+        // Category bars — 同时显示贡献值和原始值+单位
+        let catHtml = '';
+        if (r.categories && Object.keys(r.categories).length > 0) {
+            const maxCat = Math.max(...Object.values(r.categories), 0.1);
+            catHtml = '<div style="display:flex;gap:8px;margin:12px 0;flex-wrap:wrap;">';
+            for (const [name, val] of Object.entries(r.categories)) {
+                const pct = (val / maxCat) * 100;
+                const color = catColors[name] || '#888';
+                const raw = (r.cat_raws && r.cat_raws[name]) || null;
+                let rawLabel = '';
+                if (raw) {
+                    rawLabel = `<div style="font-size:11px;color:#aaa;margin-top:1px;">${raw.value}${raw.unit}</div>`;
+                }
+                catHtml += `<div style="flex:1;min-width:80px;text-align:center;padding:8px;background:#1e1e2e;border-radius:8px;">
+                    <div style="font-size:11px;color:#888;margin-bottom:6px;">${name}</div>
+                    <div style="height:60px;display:flex;align-items:flex-end;justify-content:center;">
+                        <div style="width:24px;height:${Math.max(pct,2)}%;border-radius:4px 4px 0 0;background:${color};transition:height 0.5s;"></div>
+                    </div>
+                    <div style="font-size:13px;font-weight:600;margin-top:4px;">${val.toFixed(2)}</div>
+                    ${rawLabel}
+                </div>`;
+            }
+            catHtml += '<div style="font-size:10px;color:#666;width:100%;text-align:center;margin-top:2px;">上方数值=贡献值，下方=原始值</div>';
+            catHtml += '</div>';
+        }
+
+        // Feature table
+        let featHtml = '';
+        if (r.key_features && r.key_features.length > 0) {
+            const maxContrib = Math.max(...r.key_features.map(f => f.contribution), 0.001);
+            featHtml = '<table class="feature-table"><tr><th>特征</th><th>贡献值</th><th>特征值</th><th>P95阈值</th><th>超出倍数</th></tr>';
+            r.key_features.forEach(f => {
+                const pct = (f.contribution / maxContrib) * 100;
+                featHtml += `<tr>
+                    <td>${f.name}</td>
+                    <td><div class="bar-cell"><div class="bar" style="width:${pct}%;background:#e94560"></div>${f.contribution.toFixed(4)}</div></td>
+                    <td>${f.value}</td>
+                    <td>${f.threshold}</td>
+                    <td>${(f.excess).toFixed(1)}x</td>
+                </tr>`;
+            });
+            featHtml += '</table>';
+        }
+
+        html += `<div class="result-card">
+            <div class="result-header" onclick="toggleDetail(${idx})">
+                <div class="song-info">
+                    <div class="name">${r.chart_name || r.song_name || r.source_file}</div>
+                    <div class="meta">${[r.composer, r.charter, r.level_tag ? '['+r.level_tag+']' : ''].filter(Boolean).join(' · ')} ${r.format}</div>
+                </div>
+                <div class="pred">
+                    <div class="value" style="color:${r.prediction >= 17 ? '#e94560' : r.prediction >= 15 ? '#f39c12' : '#2ecc71'}">${r.prediction.toFixed(2)}</div>
+                    <div class="gb-label">GB ${r.gb.toFixed(2)} + Boost ${r.boost.toFixed(2)}</div>
+                </div>
+                <div class="expand">&#x25BC;</div>
+            </div>
+            <div class="result-detail" id="detail-${idx}">
+                <div class="chart-info-grid">
+                    <div class="chart-info-item"><div class="label">总物量</div><div class="value">${r.total_notes}</div></div>
+                    <div class="chart-info-item"><div class="label">时长</div><div class="value">${r.duration_sec}s</div></div>
+                    <div class="chart-info-item"><div class="label">BPM</div><div class="value">${r.bpm}</div></div>
+                    <div class="chart-info-item"><div class="label">NPS</div><div class="value">${r.notes_per_second}</div></div>
+                    <div class="chart-info-item"><div class="label">TPS(蓝键)</div><div class="value">${r.tap_per_second}</div></div>
+                </div>
+                ${catHtml}
+                ${featHtml}
+            </div>
+        </div>`;
+    });
+
+    document.getElementById('resultsContainer').innerHTML = html;
+}
+
+function toggleDetail(idx) {
+    const el = document.getElementById(`detail-${idx}`);
+    el.classList.toggle('open');
+}
+</script>
+</body>
+</html>

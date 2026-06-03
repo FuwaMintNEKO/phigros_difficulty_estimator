@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# === 工作区文件（不提交到 GitHub）===
+
+# 旧模型
+models/5dim_model.pkl
+models/5dim_model_v3.pkl
+models/5dim_model_v4.pkl
+models/5dim_model_v5.pkl
+models/gb_final_model.pkl
+models/README.md
+models/*_predictions_*.csv
+models/5dim_predictions.csv
+
+# 模型归档
+model_archive/
+
+# 模型备份
+models_backup/
+
+# 分析数据
+analysis/
+
+# 旧训练脚本（保留 train_5dim_v4.py）
+train_5dim.py
+train_5dim_v3.py
+train_extrapolation.py
+train_final_v2.py
+train_final_v3.py
+train_model.py
+train_nn.py
+train_official_only.py
+train_save_v1.py
+train_v3_hybrid.py
+
+# 测试/调试/分析脚本
+check_*.py
+debug_*.py
+test_*.py
+compare_*.py
+list_*.py
+analyze_*.py
+predict_new_*.py
+predict_test_chart.py
+predict.py
+main.py
+move_to_used.py
+_list_charts.py
+dimension_analysis.py
+dimension_summary.py
+feature_analysis.py
+evaluate_test_datas.py
+
+# 训练日志
+train_out*.txt
+
+# 截图
+screenshot_*.png
