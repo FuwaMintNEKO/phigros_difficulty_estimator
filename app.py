@@ -8,7 +8,7 @@ from predict_rpe import convert_rpe_to_standard
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_2.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_3.pkl')
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -17,16 +17,15 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 
 # 从 pickle 加载 FLAT_FEATURES（与训练脚本自动同步）
 FLAT_FEATURES = m.get('FLAT_FEATURES', [])
-DC = m.get('dynamic_cap', {'knee': 2.5, 'asymptote': 3.0, 'steepness': 1.5})
+DC = m.get('dynamic_cap', {'knee': 2.5, 'power': 0.9})
 
 def _dynamic_cap(raw):
-    """动态cap：线性到knee，之后Michaelis-Menten压缩"""
-    KNEE = DC['knee']
-    ASYMPTOTE = DC['asymptote']
+    """指数衰减cap：线性到knee，超出部分 ^power 加上去，无硬上限"""
+    KNEE = DC['knee']; POWER = DC['power']
     if raw <= KNEE:
         return raw
     excess = raw - KNEE
-    return KNEE + ASYMPTOTE * excess / (excess + DC['steepness'])
+    return KNEE + excess ** POWER
 
 
 def compute_boost(feats):

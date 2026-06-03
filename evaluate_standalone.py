@@ -5,7 +5,7 @@ from feature_extractor import extract_features
 from unified_parser import load_chart
 
 # ====== 从 app.py 导入最新的 boost 逻辑 ======
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_2.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_3.pkl')
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
 gb = m['gb']; scaler = m['scaler']
@@ -13,13 +13,13 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 
 # 从 pickle 加载 FLAT_FEATURES（和训练脚本同步）
 FLAT_FEATURES = m.get('FLAT_FEATURES', [])
-DC = m.get('dynamic_cap', {'knee': 2.5, 'asymptote': 3.0, 'steepness': 1.5})
+DC = m.get('dynamic_cap', {'knee': 2.5, 'power': 0.9})
 
 def _dynamic_cap(raw):
-    KNEE = DC['knee']; ASYMPTOTE = DC['asymptote']
+    KNEE = DC['knee']; POWER = DC['power']
     if raw <= KNEE: return raw
     excess = raw - KNEE
-    return KNEE + ASYMPTOTE * excess / (excess + DC['steepness'])
+    return KNEE + excess ** POWER
 
 def compute_boost(feats):
     contribs = []
@@ -44,7 +44,7 @@ DL = r'C:\Users\NaNK\Downloads'
 
 charts = [
     ("DA'AT",                   TD, '2155734445357448.json',        18.2),
-    ("WakingShadows",           TD, '93562988.json',                17.8),
+    ("WakingShadows",           TD, '93562988.json',                18.1),
     ("Chart_SP #13",            TD, 'Chart_SP #1347(1).json',       17.6),
     ("105秒伝說",               TD, 'Sigma (Haocore Mix) ~ 105秒の伝說 ~.json', 16.1),
     ("LiFE Garden(1.05x)",      TD, '6923526264684294.json',        17.9),
@@ -64,7 +64,7 @@ charts = [
     ("Lemegeton",               DL, 'Lemegeton -little key of solomon-(16.6).json', 16.6),
     ("Submerged City",          DL, 'Submerged City(18.0).json',    18.0),
     ("Rrharil AT",              r'D:\迅雷下载\Phigros_Resource-master\Phigros_Resource-master\chart\Rrharil.TeamGrimoire.0', 'AT.json', 17.6),
-    ("QZKagoRequiem AT",        r'D:\迅雷下载\Phigros_Resource-master\Phigros_Resource-master\chart\QZKagoRequiem.tpazolite.0', 'AT.json', 17.6),
+    ("QZKagoRequiem AT",        r'D:\迅雷下载\Phigros_Resource-master\Phigros_Resource-master\chart\QZKagoRequiem.tpazolite.0', 'AT.json', 17.4),
 ]
 
 # ====== 运行 ======

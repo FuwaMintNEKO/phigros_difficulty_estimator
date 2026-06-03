@@ -76,10 +76,10 @@ python app.py --debug                          # 调试模式
 ```
 
 - **GB 模型：** GradientBoostingRegressor (600 棵树, max_depth=5, lr=0.05)
-- **动态 Cap：** Michaelis-Menten 曲线，`knee=2.5, asymptote=3.0, steepness=1.5`
+- **动态 Cap：** 指数衰减，`knee=2.5, power=0.9`（超出部分开 0.9 次方，无硬上限）
 - **训练数据：** 957 张官谱
 - **特征数量：** 240 个原始特征 → 28 个平铺特征
-- **测试表现：** 20 张测试谱平均误差 0.192，17/20 < 0.3
+- **测试表现：** 20 张测试谱平均误差 0.193，15/20 < 0.3
 
 ### API
 
@@ -119,7 +119,7 @@ python app.py --host 0.0.0.0 --port 5000
 python train_5dim_v4.py
 ```
 
-训练完成后会自动保存新模型到 `models/5dim_model_v5_2.pkl`。
+训练完成后会自动保存新模型到 `models/5dim_model_v5_3.pkl`。
 
 ## 测试评估
 
@@ -137,12 +137,28 @@ python evaluate_standalone.py
 ├── predict_rpe.py           # RPE 谱面格式解析
 ├── unified_parser.py        # 统一谱面解析器
 ├── data_loader.py           # 数据加载
-├── train_5dim_v4.py         # 训练脚本（当前版本 v5.2）
+├── train_5dim_v4.py         # 训练脚本（当前版本 v5.3）
 ├── evaluate_standalone.py   # 测试评估脚本
 ├── requirements.txt         # Python 依赖
 ├── deploy_termux.sh         # Termux 手机部署脚本
 ├── templates/
 │   └── index.html           # Web 前端
 └── models/
-    └── 5dim_model_v5_2.pkl  # 当前模型
+    └── 5dim_model_v5_3.pkl  # 当前模型
+```
+
+## 更新日志
+
+### v5.3 (2026-06-03)
+- **动态 Cap 重构**：将 Michaelis-Menten 曲线替换为**指数衰减策略**。
+  - 低于 knee (2.5) 的部分保持线性
+  - 超出部分 `excess ^ 0.9` 加到结果上，无硬上限
+  - 真正的高难谱面（如 People people、Galaxy Collapse）不再被过度压缩
+- **训练 R²=0.9564** (v5.2: 0.9535) | **训练 MAE=0.6735** (v5.2: 0.695)
+- **测试 20 谱平均误差=0.193**，15/20 < 0.3
+
+### v5.2 (2026-06-03)
+- 密度特征从 NPS 改为 TPS（核心音符：tap+hold）
+- 旧密度退化为辅助小特征
+- 训练 R²=0.9535
 ```

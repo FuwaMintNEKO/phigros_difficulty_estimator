@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from unified_parser import load_chart
 
 print('='*70)
-print('  Phigros 难度预测系统 v5.2')
+print('  Phigros 难度预测系统 v5.3（指数cap）')
 print('  训练集: 官谱957 (无自定义谱)')
 print('  测试集: test_datas+Downloads 共20张谱面')
 print('  密度使用 tap+hold (core_notes) 替代全音符')
@@ -140,6 +140,10 @@ FLAT_FEATURES = [
     ('multi_finger_3plus_events', 10, 0.06),
 ]
 
+# 动态cap参数（供 _dynamic_cap 使用）
+DC = {'knee': 2.5, 'power': 0.9}
+
+
 def compute_simple_boost(feats, p95, p99):
     """平铺高相关特征列表 — 不区分维度，全部放在一块算""" 
     """26特征全面平铺，按5大类别分组"""
@@ -150,13 +154,12 @@ def compute_simple_boost(feats, p95, p99):
 
 
 def _dynamic_cap(raw):
-    """动态cap：线性到2.5，之后Michaelis-Menten压缩，渐近线5.5"""
-    KNEE = 2.5
-    ASYMPTOTE = 3.0  # 渐近线增量，最终渐近线 = KNEE + ASYMPTOTE = 5.5
+    """指数衰减cap：线性到knee，超出部分 ^power 加上去，无硬上限"""
+    KNEE = DC['knee']; POWER = DC['power']
     if raw <= KNEE:
         return raw
     excess = raw - KNEE
-    return KNEE + ASYMPTOTE * excess / (excess + 1.5)
+    return KNEE + excess ** POWER
 
 # ====== 联合训练GB+boost ======
 print('\n--- 联合训练 GB+boost ---')
@@ -220,10 +223,10 @@ model_out = {
     'gb': gb_full, 'scaler': scaler_gb, 'feature_names': feature_names,
     'p95_vals': p95_vals, 'p99_vals': p99_vals,
     'FLAT_FEATURES': FLAT_FEATURES,
-    'dynamic_cap': {'knee': 2.5, 'asymptote': 3.0, 'steepness': 1.5},
+    'dynamic_cap': {'knee': 2.5, 'power': 0.9},
     'metrics': {'r2': r2, 'mae': mae, 'n_train': n_samples},
 }
-out_path = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_2.pkl')
+out_path = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_3.pkl')
 os.makedirs(os.path.dirname(out_path), exist_ok=True)
 with open(out_path, 'wb') as f:
     pickle.dump(model_out, f)
@@ -231,7 +234,7 @@ print(f'\n  模型已保存: {out_path}')
 
 # 保存CSV
 import csv
-csv_path = out_path.replace('.pkl', '_predictions_v5_2.csv')
+csv_path = out_path.replace('.pkl', '_predictions_v5_3.csv')
 with open(csv_path, 'w', newline='', encoding='utf-8') as f:
     w = csv.writer(f)
     w.writerow(['谱面', '难度', 'GB', 'Boost', '预测', '误差'])
