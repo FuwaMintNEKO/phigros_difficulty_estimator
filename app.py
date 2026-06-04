@@ -3,21 +3,43 @@ from flask import Flask, request, jsonify, render_template
 
 sys.path.insert(0, os.path.dirname(__file__))
 from feature_extractor import extract_features
-from predict_rpe import convert_rpe_to_standard
+from unified_parser import load_chart_from_bytes
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_3.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v7_3.pkl')
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
 gb = m['gb']; scaler = m['scaler']
 FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
+BOOST_BINS = m.get('boost_bin_stats', {})  # 分档统计
 
 # 从 pickle 加载 FLAT_FEATURES（与训练脚本自动同步）
 FLAT_FEATURES = m.get('FLAT_FEATURES', [])
 DC = m.get('dynamic_cap', {'knee': 2.5, 'power': 0.9})
+
+import math
+
+# 平滑条件性boost调整：只在boost/GB比值异常时压缩
+# v7.3: 目标ratio=0.24, 压缩power=0.70, 触发thresh=0.24 (IN/AT Ridge+迭代优化)
+RATIO_THRESHOLD = 0.24    # 超过此值开始触发调整
+RATIO_TARGET = 0.24       # 调整目标比值
+RATIO_POWER = 0.70        # <1 → 凸性压缩
+RATIO_STEEPNESS = 25      # sigmoid 过渡陡度
+
+def adjust_boost_smooth(boost, gb):
+    """Sigmoid平滑条件性调整：ratio<th不动，ratio>th逐渐施加凸性压缩。boost<2不压缩（简单谱需要boost补偿低GB）"""
+    if boost < 2.0:
+        return boost
+    ratio = boost / gb if gb > 0 else 0
+    expected = RATIO_TARGET * gb
+    if expected <= 0 or boost <= 0:
+        return boost
+    adj = expected * ((boost / expected) ** RATIO_POWER)
+    w = 1 / (1 + math.exp(-RATIO_STEEPNESS * (ratio - RATIO_THRESHOLD)))
+    return (1 - w) * boost + w * adj
 
 def _dynamic_cap(raw):
     """指数衰减cap：线性到knee，超出部分 ^power 加上去，无硬上限"""
@@ -29,19 +51,19 @@ def _dynamic_cap(raw):
 
 
 def compute_boost(feats):
-    """5大类别boost计算，返回总boost、类别分数、原始值和贡献明细"""
+    """6大类别boost计算，返回总boost、类别分数、原始值和贡献明细"""
     CATEGORIES = {
-        '密度': ['core_notes_per_second', 'notes_per_second', 'peak_density_top5avg_1beat', 'density_above_zero_ratio', 'std_density_1beat'],
-        '1smax密度': ['core_peak_density_1sec_top5avg', 'peak_density_1sec_top5avg', 'peak_tps_1sec_top5avg', 'micro_peak_top5_0.0625beat'],
+        '密度': ['density_dimension', 'core_peak_density_1sec_top5avg', 'core_peak_density_top5avg_1beat'],
         '平均位移': ['movement_per_second', 'burst_avg_movement', 'wide_jump_density', 'sim_pos_spread_max'],
-        '耐力': ['stamina_ratio', 'tap_per_second', 'total_notes', 'tap_count', 'duration_sec', 'global_jack_count', 'burst_intensity_mean', 'tap_burst_top5'],
-        '读谱': ['density_transition_mean', 'density_transition_std', 'tempo_change_count', 'offbeat_ratio', 'rhythm_entropy', 'type_switch_per_sec', 'multi_finger_3plus_events'],
+        '配置': ['stair_density', 'stair_speed_avg', 'stair_complexity', 'stair_chord_ratio', 'trill_density', 'jack_density', 'chord_size_entropy', 'sim_pos_spread_mean', 'multi_finger_3plus_events', 'weighted_mf_score_per_sec', 'discrete_mf_ratio', 'chord_alternation_rate', 'position_cluster_count', 'track_deviation_score', 'position_entropy', 'position_range_used', 'pattern_switch_rate', 'direction_irregularity', 'hold_interference_index', 'drag_flick_ratio'],
+        '耐力': ['stamina_ratio', 'tap_per_second', 'total_notes', 'tap_count', 'duration_sec', 'rest_ratio', 'global_jack_count', 'burst_intensity_mean', 'tap_burst_top5'],
+        '读谱': ['density_transition_mean', 'density_transition_std', 'tempo_change_count', 'offbeat_ratio', 'rhythm_entropy', 'type_switch_per_sec', 'note_clutter_ratio'],
     }
     # 每个类别的主要可读特征（用于显示原始值）
     CAT_RAW_KEY = {
-        '密度': ('core_notes_per_second', '键/秒 (TPS)'),
-        '1smax密度': ('core_peak_density_1sec_top5avg', '键/秒 (TPS)'),
+        '密度': ('density_dimension', '(=√(TPS×峰值))'),
         '平均位移': ('movement_per_second', '格/秒'),
+        '配置': ('pattern_switch_rate', '切换/秒'),
         '耐力': ('tap_per_second', '键/秒'),
         '读谱': ('density_transition_mean', ''),
     }
@@ -56,10 +78,10 @@ def compute_boost(feats):
         if v <= t:
             continue
         e = v / t - 1.0
-        x = co * (e ** 0.55)
+        x = co * (e ** 0.70)
         if v > max(P99.get(fname, 0), bl * 0.5):
             pe = v / max(P99.get(fname, 0), bl * 0.5) - 1.0
-            x += co * max(0, pe) ** 0.55 * 0.5
+            x += co * max(0, pe) ** 0.70 * 0.5
         total += x
         contribs.append((fname, round(x, 4), round(v, 2), round(t, 2), round(v/t, 3)))
     boost = _dynamic_cap(total)
@@ -101,139 +123,6 @@ def extract_pe_name(text):
     return ''
 
 
-# ====== PE格式解析 (.pe / json后缀但实际是PE文本) ======
-def parse_pe_format(text):
-    """将PE格式文本转为Phigros标准JSON
-
-    关键差异说明:
-    - PE格式时间单位为"秒"，Phigros标准格式时间单位为"32分音符"
-    - PE的n3(hold)是逐tick记录的，需要合并为单个hold带holdTime
-    """
-    lines = text.strip().split('\n')
-    bpm = 120.0
-    judge_line_count = 0
-
-    for raw in lines:
-        raw = raw.strip()
-        if not raw or raw.startswith('#'):
-            continue
-        parts = raw.split()
-        if not parts:
-            continue
-        cmd = parts[0]
-        if cmd == 'bp' and len(parts) >= 3:
-            bpm = float(parts[2])
-        elif cmd == 'cp' and len(parts) >= 3:
-            idx = int(parts[1])
-            judge_line_count = max(judge_line_count, idx + 1)
-
-    judge_lines = [{'bpm': bpm, 'notesAbove': [], 'notesBelow': [], 'speedEvents': []}
-                   for _ in range(judge_line_count)]
-
-    if judge_line_count == 0:
-        judge_line_count = 1
-        judge_lines = [{'bpm': bpm, 'notesAbove': [], 'notesBelow': [], 'speedEvents': []}]
-
-    pe_type_map = {'n1': 1, 'n2': 2, 'n3': 3, 'n4': 4}
-
-    raw_hold_groups = {}
-
-    for raw in lines:
-        raw = raw.strip()
-        if not raw or raw.startswith('#') or raw.startswith('&'):
-            continue
-        parts = raw.split()
-        if not parts:
-            continue
-        cmd = parts[0]
-        if cmd in pe_type_map:
-            ntype = pe_type_map[cmd]
-            line_idx = int(parts[1])
-            start_time = float(parts[2])
-            pos_x = float(parts[3])
-            if line_idx >= judge_line_count:
-                continue
-            if cmd == 'n3':
-                key = (line_idx, round(pos_x, 1))
-                raw_hold_groups.setdefault(key, []).append((start_time, parts))
-            else:
-                norm_x = pos_x / 900.0
-                std_time = start_time * bpm / 1.875
-                note = {'type': ntype, 'time': std_time, 'positionX': norm_x, 'holdTime': 0, 'speed': 1.0}
-                if cmd == 'n2' and len(parts) >= 5:
-                    pos_y = float(parts[4])
-                    note['positionY'] = pos_y / 900.0
-                judge_lines[line_idx]['notesAbove'].append(note)
-
-    for (line_idx, _), entries in raw_hold_groups.items():
-        entries.sort(key=lambda x: x[0])
-        used = set()
-        for i in range(1, len(entries)):
-            t, parts = entries[i]
-            p1 = int(parts[4]) if len(parts) >= 5 else 0
-            if p1 == 2:
-                prev_t, prev_parts = entries[i - 1]
-                prev_p1 = int(prev_parts[4]) if len(prev_parts) >= 5 else 0
-                hold_duration = t - prev_t
-                if prev_p1 == 1 and hold_duration >= 0.05:
-                    norm_x = float(prev_parts[3]) / 900.0
-                    std_time = prev_t * bpm / 1.875
-                    std_hold = hold_duration * bpm / 1.875
-                    note = {'type': 3, 'time': std_time, 'positionX': norm_x, 'holdTime': std_hold, 'speed': 1.0}
-                    judge_lines[line_idx]['notesAbove'].append(note)
-                    used.add(i - 1)
-                    used.add(i)
-        i = 0
-        while i < len(entries):
-            if i in used:
-                i += 1
-                continue
-            t, parts = entries[i]
-            pos_x = float(parts[3])
-            p1 = int(parts[4]) if len(parts) >= 5 else 0
-            gap = 0.50
-            group = [entries[i]]
-            j = i + 1
-            while j < len(entries):
-                if j in used or entries[j][0] - group[-1][0] > gap:
-                    break
-                group.append(entries[j])
-                j += 1
-            first_t = group[0][0]
-            last_t = group[-1][0]
-            hold_duration = last_t - first_t
-            if hold_duration < 0.05:
-                for _, gp in group:
-                    pos_x = float(gp[3])
-                    norm_x = pos_x / 900.0
-                    std_time = first_t * bpm / 1.875
-                    note = {'type': 1, 'time': std_time, 'positionX': norm_x, 'holdTime': 0, 'speed': 1.0}
-                    judge_lines[line_idx]['notesAbove'].append(note)
-            else:
-                norm_x = float(group[0][1][3]) / 900.0
-                std_time = first_t * bpm / 1.875
-                std_hold = hold_duration * bpm / 1.875
-                note = {'type': 3, 'time': std_time, 'positionX': norm_x, 'holdTime': std_hold, 'speed': 1.0}
-                judge_lines[line_idx]['notesAbove'].append(note)
-            i = j
-
-    return {'formatVersion': 3, 'offset': 0, 'judgeLineList': judge_lines}
-
-
-# ====== 解析谱面 ======
-def parse_chart(data, raw_bytes=None):
-    """自动识别标准/RPE/PE格式"""
-    if isinstance(data, dict):
-        if 'META' in data and 'RPEVersion' in data.get('META', {}):
-            return convert_rpe_to_standard(data)
-        return data
-    if isinstance(data, str) and raw_bytes:
-        text = raw_bytes.decode('utf-8')
-        if text.strip() and not text.strip().startswith('{'):
-            return parse_pe_format(text)
-    return data
-
-
 # ====== 单谱预测 ======
 def predict_one_chart(chart_data):
     feats = extract_features(chart_data)
@@ -244,7 +133,8 @@ def predict_one_chart(chart_data):
     xs = scaler.transform(x)
     p_gb = float(gb.predict(xs)[0])
     p_b, dims, key_contribs = compute_boost(feats)
-    p_f = p_gb + p_b
+    p_b_adj = adjust_boost_smooth(p_b, p_gb)
+    p_f = p_gb + p_b_adj
 
     meta = {}
     if 'META' in chart_data:
@@ -269,14 +159,25 @@ def predict_one_chart(chart_data):
         'format': 'RPE' if is_rpe else 'Standard',
         'gb': round(p_gb, 4),
         'boost': round(p_b, 4),
+        'boost_adj': round(p_b_adj, 4),
+        'boost_ratio': round(p_b / p_gb, 4) if p_gb > 0 else 0,
         'categories': dims.get('categories', {}),
         'cat_raws': dims.get('cat_raws', {}),
         'prediction': round(p_f, 4),
         'total_notes': feats.get('total_notes', 0),
         'duration_sec': round(feats.get('duration_sec', 0), 1),
         'bpm': feats.get('bpm', 0),
+        'bpm_min': feats.get('bpm_min', 0),
+        'bpm_max': feats.get('bpm_max', 0),
+        'bpm_change_count': feats.get('bpm_change_count', 0),
         'notes_per_second': round(feats.get('notes_per_second', 0), 2),
+        'real_notes_per_second': round(feats.get('real_notes_per_second', 0), 2),
+        'core_notes_per_second': round(feats.get('core_notes_per_second', 0), 2),
+        'real_core_notes_per_second': round(feats.get('real_core_notes_per_second', 0), 2),
         'tap_per_second': round(feats.get('tap_per_second', 0), 2),
+        'rest_duration_sec': round(feats.get('rest_duration_sec', 0), 1),
+        'rest_ratio': round(feats.get('rest_ratio', 0), 3),
+        'real_active_sec': round(feats.get('real_active_sec', 0), 1),
         'jack_count': feats.get('global_jack_count', 0),
         'key_features': [
             {
@@ -301,25 +202,8 @@ def index():
 def predict_one():
     """接收单个 JSON body（原始谱面格式），返回单个预测结果（供 Android Overlay 使用）"""
     try:
-        raw = request.get_data(as_text=True)
-        if not raw:
-            return jsonify({'error': '无效的 JSON'}), 400
-
-        # 先尝试标准格式
-        chart_data = None
-        try:
-            data = json.loads(raw)
-            chart_data = parse_chart(data)
-        except:
-            pass
-
-        # 再尝试 RPE 格式
-        if chart_data is None:
-            try:
-                chart_data = parse_pe_format(raw)
-            except:
-                pass
-
+        raw_bytes = request.get_data()
+        chart_data, _ = load_chart_from_bytes(raw_bytes)
         if chart_data is None:
             return jsonify({'error': '无法解析谱面格式'}), 400
 
@@ -340,6 +224,11 @@ def predict():
         return jsonify({'error': '未上传文件'}), 400
 
     files = request.files.getlist('files[]') or [request.files['file']]
+    # 读取用户选择的解析格式
+    force_format = request.form.get('format', 'auto')
+    if force_format == 'auto':
+        force_format = None
+
     results = []
     errors = []
 
@@ -359,11 +248,9 @@ def predict():
                         chart_data = None
                         raw_text = None
                         try:
-                            data = json.loads(raw)
-                            chart_data = parse_chart(data)
+                            chart_data, raw_text = load_chart_from_bytes(raw, force_format)
                         except:
-                            raw_text = raw.decode('utf-8')
-                            chart_data = parse_pe_format(raw_text)
+                            raw_text = raw.decode('utf-8', errors='replace')
                         if chart_data is None:
                             errors.append({'file': name, 'error': '无法解析格式'})
                             continue
@@ -385,16 +272,9 @@ def predict():
                 chart_data = None
                 raw_text = None
                 try:
-                    data = json.loads(raw_bytes)
-                    chart_data = parse_chart(data)
+                    chart_data, raw_text = load_chart_from_bytes(raw_bytes, force_format)
                 except:
                     pass
-                if chart_data is None:
-                    try:
-                        raw_text = raw_bytes.decode('utf-8')
-                        chart_data = parse_pe_format(raw_text)
-                    except:
-                        pass
                 if chart_data is None:
                     errors.append({'file': f.filename, 'error': '无法解析谱面格式'})
                     continue

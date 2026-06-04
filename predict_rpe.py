@@ -22,6 +22,11 @@ def convert_rpe_to_standard(rpe_data):
 
     data = {'formatVersion': 3, 'offset': rpe_data.get('offset', 0), 'judgeLineList': []}
 
+    # 保留 BPMList（变速谱的关键数据）
+    bpm_list = rpe_data.get('BPMList', [])
+    if bpm_list:
+        data['BPMList'] = bpm_list
+
     for line in judge_lines:
         notes_above = []
         notes_below = []

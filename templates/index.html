@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Phigros 难度定数预测系统 v5.3</title>
+<title>Phigros 难度定数预测系统 v7.1</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; background: #0f0f14; color: #e0e0e8; min-height: 100vh; }
@@ -85,8 +85,8 @@ header .badge { display: inline-block; background: #e94560; color: #fff; font-si
 <body>
 <div class="container">
     <header>
-        <h1>Phigros 难度定数预测 <span class="badge">v5.3</span></h1>
-        <p>5大类别(密度/1smax密度/位移/耐力/读谱) · 支持官谱/自制谱(RPE) · 批量上传</p>
+        <h1>Phigros 难度定数预测 <span class="badge">v7.1</span></h1>
+        <p>5大维度均衡(配置×0.55/读谱×2.0/密度×1.2/位移×1.1) · 统一密度=√(总TPS×峰值) · 型识别+多指协调+位置熵 · 批量上传</p>
     </header>
 
     <div class="drop-zone" id="dropZone">
@@ -103,6 +103,16 @@ header .badge { display: inline-block; background: #e94560; color: #fff; font-si
         <button class="btn btn-primary" id="predictBtn" onclick="doPredict()" disabled>开始预测</button>
         <button class="btn btn-secondary" onclick="clearAll()">清空</button>
         <span id="fileCount" style="color:#666;font-size:13px;"></span>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
+            <label for="formatSelect" style="font-size:12px;color:#888;">解析格式:</label>
+            <select id="formatSelect" style="background:#1a1a24;color:#e0e0e8;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:13px;">
+                <option value="auto">自动识别</option>
+                <option value="standard">官谱/标准</option>
+                <option value="rpe">RPE普通</option>
+                <option value="rpe_v3">RPE v3 (愚人节单线)</option>
+                <option value="pe">PE格式</option>
+            </select>
+        </div>
     </div>
 
     <div id="statsContainer"></div>
@@ -188,6 +198,8 @@ async function doPredict() {
 
     const formData = new FormData();
     uploadedFiles.forEach(f => formData.append('files[]', f));
+    const format = document.getElementById('formatSelect').value;
+    formData.append('format', format);
 
     try {
         const resp = await fetch('/predict', { method: 'POST', body: formData });
@@ -234,7 +246,7 @@ function renderStats(results) {
 
 function renderResults(results) {
     // Category colors
-    const catColors = { '密度': '#4ecdc4', '1smax密度': '#45b7d1', '平均位移': '#f9ca24', '耐力': '#e94560', '读谱': '#a29bfe' };
+    const catColors = { '密度': '#4ecdc4', '平均位移': '#f9ca24', '配置': '#a29bfe', '耐力': '#e94560', '读谱': '#6c5ce7' };
     
     let html = '';
     results.forEach((r, idx) => {
@@ -290,17 +302,18 @@ function renderResults(results) {
                 </div>
                 <div class="pred">
                     <div class="value" style="color:${r.prediction >= 17 ? '#e94560' : r.prediction >= 15 ? '#f39c12' : '#2ecc71'}">${r.prediction.toFixed(2)}</div>
-                    <div class="gb-label">GB ${r.gb.toFixed(2)} + Boost ${r.boost.toFixed(2)}</div>
+                    <div class="gb-label">GB ${r.gb.toFixed(2)} + Adj.Boost ${r.boost_adj.toFixed(2)} <span style="font-size:11px;color:#888">(raw ${r.boost.toFixed(2)} ratio=${r.boost_ratio.toFixed(3)})</span></div>
                 </div>
                 <div class="expand">&#x25BC;</div>
             </div>
             <div class="result-detail" id="detail-${idx}">
                 <div class="chart-info-grid">
                     <div class="chart-info-item"><div class="label">总物量</div><div class="value">${r.total_notes}</div></div>
-                    <div class="chart-info-item"><div class="label">时长</div><div class="value">${r.duration_sec}s</div></div>
-                    <div class="chart-info-item"><div class="label">BPM</div><div class="value">${r.bpm}</div></div>
-                    <div class="chart-info-item"><div class="label">NPS</div><div class="value">${r.notes_per_second}</div></div>
-                    <div class="chart-info-item"><div class="label">TPS(蓝键)</div><div class="value">${r.tap_per_second}</div></div>
+                    <div class="chart-info-item"><div class="label">时长 / 有效时长</div><div class="value">${r.duration_sec}s / ${r.real_active_sec}s</div></div>
+                    <div class="chart-info-item"><div class="label">BPM</div><div class="value">${r.bpm_change_count > 0 ? Math.round(r.bpm_min) + '~' + Math.round(r.bpm_max) + ' (' + r.bpm_change_count + '变)' : Math.round(r.bpm)}</div></div>
+                    <div class="chart-info-item"><div class="label">真实TPS (全时段)</div><div class="value">${r.real_core_notes_per_second} (${r.core_notes_per_second})</div></div>
+                    <div class="chart-info-item"><div class="label">真实NPS (全时段)</div><div class="value">${r.real_notes_per_second} (${r.notes_per_second})</div></div>
+                    <div class="chart-info-item"><div class="label">休息段 (>1s)</div><div class="value">${r.rest_duration_sec}s / ${(r.rest_ratio*100).toFixed(1)}%</div></div>
                 </div>
                 ${catHtml}
                 ${featHtml}

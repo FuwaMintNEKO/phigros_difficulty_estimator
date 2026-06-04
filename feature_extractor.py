@@ -8,18 +8,102 @@ NOTE_HOLD = 3
 NOTE_FLICK = 4
 
 
+def _parse_bpm_timeline(chart_data):
+    """从 BPMList 构建 BPM 时间线 [(start_beat, bpm), ...] 按起始拍排序
+    兼容两种startTime格式:
+      - RPE格式: [measure, beat, division] (list)
+      - 标准格式: float (已是beats)
+    """
+    bpm_list = chart_data.get('BPMList', [])
+    timeline = []
+    if bpm_list:
+        for entry in bpm_list:
+            st = entry.get('startTime', [0, 0, 1])
+            if isinstance(st, (list, tuple)):
+                start_beat = st[0] / max(st[2], 1)
+            else:
+                start_beat = float(st) if st else 0.0
+            timeline.append((start_beat, entry['bpm']))
+        timeline.sort(key=lambda x: x[0])
+    return timeline
+
+
+def _resolve_bpm_at_beat(ticks, bpm_timeline, fallback_bpm):
+    """查表获取指定ticks位置的 BPM"""
+    if not bpm_timeline:
+        return fallback_bpm
+    beat_time = ticks / 32  # ticks → beats
+    bpm = bpm_timeline[0][1]
+    for start_beat, b in bpm_timeline:
+        if start_beat <= beat_time:
+            bpm = b
+        else:
+            break
+    return bpm
+
+
+def _compute_duration_sec(bpm_timeline, total_beats):
+    """用 BPM 时间线计算真实总时长(秒)，total_beats=谱面总拍数"""
+    total_sec = 0.0
+    for i, (seg_start, bpm_val) in enumerate(bpm_timeline):
+        seg_end = bpm_timeline[i+1][0] if i+1 < len(bpm_timeline) else total_beats
+        seg_beats = max(0, min(seg_end, total_beats) - max(seg_start, 0))
+        total_sec += seg_beats / bpm_val * 60  # beats ÷ bpm × 60 = 秒
+    return total_sec
+
+
+def _normalize_time_st(note):
+    """统一 time 字段: startTime[beats,num,den] → ticks(1/32拍); 无 startTime 则取 time(已是ticks)"""
+    st = note.get('startTime', None)
+    if st is not None and isinstance(st, (list, tuple)):
+        beat = st[0] + (st[1] / max(st[2], 1)) if len(st) >= 3 else st[0]
+        return beat * 32  # beats → ticks
+    return note.get('time', 0)  # 官谱的 time 字段已是ticks格式
+
+def _beat_from_ticks(ticks):
+    """ticks → beats 转换"""
+    return ticks / 32
+
+
 def collect_all_notes(chart_data):
     all_notes = []
     judge_lines = chart_data.get('judgeLineList', [])
+
+    # 构建 BPM 时间线（从 BPMList，如果有的话）
+    bpm_timeline = _parse_bpm_timeline(chart_data)
+    fallback_bpm = judge_lines[0].get('bpm', 120.0) if judge_lines else 120.0
+    has_bpmlist = len(bpm_timeline) > 0
+
+    # 收集所有notes，使用正确的per-line BPM
+    line_note_counts = defaultdict(int)
     for li, line in enumerate(judge_lines):
-        bpm = line.get('bpm', 120.0)
-        for note in line.get('notesAbove', []) + line.get('notesBelow', []):
+        line_bpm_val = line.get('bpm', fallback_bpm)
+        for note in line.get('notes', []) + line.get('notesAbove', []) + line.get('notesBelow', []):
             note_copy = dict(note)
-            note_copy['bpm'] = bpm
+            beat_time = _normalize_time_st(note_copy)
+            note_copy['time'] = beat_time
+            if has_bpmlist:
+                note_copy['bpm'] = _resolve_bpm_at_beat(beat_time, bpm_timeline, fallback_bpm)
+            else:
+                note_copy['bpm'] = line_bpm_val  # 每条线用自己的BPM
             note_copy['judge_line_idx'] = li
             all_notes.append(note_copy)
+            line_note_counts[li] += 1
     all_notes.sort(key=lambda x: x['time'])
-    return all_notes, judge_lines
+
+    # 对于无BPMList的多BPM谱，构造加权BPM时间线（用于duration等计算）
+    if not has_bpmlist and len(judge_lines) > 0:
+        weighted_bpm = fallback_bpm
+        total_n = len(all_notes)
+        if total_n > 0:
+            weighted_sum = 0.0
+            for li, line in enumerate(judge_lines):
+                lb = line.get('bpm', fallback_bpm)
+                weighted_sum += lb * line_note_counts.get(li, 0)
+            weighted_bpm = weighted_sum / total_n
+        bpm_timeline = [(0, weighted_bpm)]
+
+    return all_notes, judge_lines, bpm_timeline
 
 
 def time_to_seconds(time, bpm):
@@ -40,11 +124,12 @@ def collect_speed_events(judge_lines):
 
 
 def extract_features(chart_data):
-    all_notes, judge_lines = collect_all_notes(chart_data)
+    all_notes, judge_lines, bpm_timeline = collect_all_notes(chart_data)
     if not all_notes:
         return None
 
-    bpm = judge_lines[0].get('bpm', 120.0) if judge_lines else 120.0
+    fallback_bpm = judge_lines[0].get('bpm', 120.0) if judge_lines else 120.0
+    bpm = bpm_timeline[0][1] if bpm_timeline else fallback_bpm
     speed_events = collect_speed_events(judge_lines)
 
     n_notes = len(all_notes)
@@ -52,6 +137,7 @@ def extract_features(chart_data):
     types = np.array([n['type'] for n in all_notes])
     positions = np.array([n.get('positionX', 0) for n in all_notes])
     hold_times = np.array([n.get('holdTime', 0) for n in all_notes])
+    note_bpms = np.array([n['bpm'] for n in all_notes])  # 每个音符的真实BPM
 
     dt = float(times[-1]) if n_notes > 0 else 0
     features = {}
@@ -59,17 +145,16 @@ def extract_features(chart_data):
     features['total_notes'] = n_notes
     features['bpm'] = bpm
     features['judge_line_count'] = len(judge_lines)
-    features['duration_beats'] = dt
-    features['duration_sec'] = time_to_seconds(dt, bpm)
+    features['duration_beats'] = dt / 32  # ticks → beats
+    features['duration_sec'] = _compute_duration_sec(bpm_timeline, features['duration_beats'])
 
-    # BPM变化特征
-    all_bpms = np.array([line.get('bpm', bpm) for line in judge_lines])
-    features['bpm_min'] = float(np.min(all_bpms))
-    features['bpm_max'] = float(np.max(all_bpms))
-    features['bpm_range'] = float(np.ptp(all_bpms))
-    features['bpm_std'] = float(np.std(all_bpms))
-    unique_bpms = set(round(b, 2) for b in all_bpms)
-    features['bpm_change_count'] = len(unique_bpms) - 1
+    # BPM变化特征（从 BPMList 时间线获取）
+    tl_bpms = [b for _, b in bpm_timeline] if bpm_timeline else [fallback_bpm]
+    features['bpm_min'] = float(min(tl_bpms)) if tl_bpms else bpm
+    features['bpm_max'] = float(max(tl_bpms)) if tl_bpms else bpm
+    features['bpm_range'] = features['bpm_max'] - features['bpm_min']
+    features['bpm_std'] = float(np.std(tl_bpms)) if len(tl_bpms) > 1 else 0.0
+    features['bpm_change_count'] = len(tl_bpms) - 1
 
     # note type counts
     tap_mask = types == NOTE_TAP
@@ -90,6 +175,7 @@ def extract_features(chart_data):
     features['drag_ratio'] = n_drag / max(n_notes, 1)
     features['hold_ratio'] = n_hold / max(n_notes, 1)
     features['flick_ratio'] = n_flick / max(n_notes, 1)
+    features['drag_flick_ratio'] = (n_drag + n_flick) / max(n_notes, 1)  # 滑/粉占比（Phigros特有）
 
     ds = max(features['duration_sec'], 0.01)
     features['notes_per_second'] = n_notes / ds
@@ -99,6 +185,23 @@ def extract_features(chart_data):
     core_n = n_tap + n_hold  # 蓝键+长条 = 核心音符
     features['core_notes_per_second'] = core_n / ds
     features['core_notes_per_beat'] = core_n / max(dt, 0.01)
+
+    # ====== 真实密度（排除 >1s 间隙，反映击打时真实密度水平） ======
+    all_t_sec = np.array([time_to_seconds(t, max(n.get('bpm', bpm), 1.0)) for t, n in zip(times, all_notes)])
+    all_t_sec.sort()
+    if n_notes > 1:
+        gaps = np.diff(all_t_sec)
+        big_gaps = gaps[gaps > 1.0]
+        rest_duration = float(np.sum(big_gaps))
+        real_active = max(all_t_sec[-1] - all_t_sec[0] - rest_duration, 0.01)
+    else:
+        rest_duration = 0.0
+        real_active = max(ds, 0.01)
+    features['real_active_sec'] = float(real_active)
+    features['rest_duration_sec'] = float(rest_duration)
+    features['rest_ratio'] = float(rest_duration / max(ds, 0.01))
+    features['real_core_notes_per_second'] = core_n / real_active  # 真实核心TPS
+    features['real_notes_per_second'] = n_notes / real_active  # 真实NPS
 
     # ====== 窗口密度（缓存避免重复计算） ======
     _density_cache = {}
@@ -139,6 +242,11 @@ def extract_features(chart_data):
     core_notes = [all_notes[i] for i in range(n_notes) if core_mask[i]]
     core_times = times[core_mask]
 
+    # core (tap+hold) 版本窗口密度（替代全音符版本）
+    for w in [1, 2, 4, 8, 16]:
+        cd = _compute_window_density(core_times, w)
+        features[f'core_std_density_{w}beat'] = float(np.std(cd)) if cd.size > 0 else 0
+
     simultaneous = _compute_simultaneous_notes(core_notes)
     features['max_simultaneous'] = simultaneous['max']
     features['avg_simultaneous'] = simultaneous['avg']
@@ -151,11 +259,27 @@ def extract_features(chart_data):
     features['multi_finger_3plus_ratio'] = mf['count_3plus'] / max(simultaneous['event_count'], 1)
     features['multi_finger_max_simultaneous'] = mf['max_simultaneous']
 
+    # 加权多指协调分（区分流式/离散）
+    # normalized: 总得分/时长，越高 = 多指协调越难
+    features['weighted_mf_score_total'] = simultaneous['weighted_mf_score_total']
+    features['weighted_mf_score_per_sec'] = simultaneous['weighted_mf_score_total'] / ds
+    features['weighted_mf_score_mean'] = simultaneous['weighted_mf_score_mean']
+    # 离散型多指占比：norm_spread > 1.5 的事件比例，越高越离散
+    features['discrete_mf_ratio'] = simultaneous['discrete_mf_ratio']
+
     cs = simultaneous['chord_sizes']
     total_sim_ev = simultaneous['event_count']
     features['chord_2note_ratio'] = cs.get(2, 0) / max(total_sim_ev, 1)
     features['chord_3note_ratio'] = cs.get(3, 0) / max(total_sim_ev, 1)
     features['chord_4plus_ratio'] = (cs.get(4, 0) + cs.get(5, 0)) / max(total_sim_ev, 1)
+
+    # 和弦大小熵（和弦大小分布的复杂度）
+    if total_sim_ev > 0:
+        cs_probs = np.array([cs.get(k, 0) for k in [2, 3, 4, 5]]) / max(total_sim_ev, 1)
+        cs_probs = cs_probs[cs_probs > 0]
+        features['chord_size_entropy'] = float(-np.sum(cs_probs * np.log2(cs_probs + 1e-10)))
+    else:
+        features['chord_size_entropy'] = 0.0
 
     ps = simultaneous['pos_spreads']
     features['sim_pos_spread_mean'] = float(np.mean(ps)) if ps else 0
@@ -280,7 +404,7 @@ def extract_features(chart_data):
             features[f'micro_max_{mw}beat'] = float(sd[0])
 
     if core_times.size > 0:
-        for mw in [0.125, 0.25]:
+        for mw in [0.0625, 0.125, 0.25]:
             d = _compute_window_density(core_times, mw)
             if d.size > 0:
                 sd = np.sort(d)[::-1]
@@ -425,6 +549,7 @@ def extract_features(chart_data):
 
     # ====== speed events ======
     features['speed_event_count'] = len(speed_events)
+    features['speed_event_density'] = len(speed_events) / max(ds, 0.01)  # 变速事件密度（次/秒）
     if speed_events:
         sv = np.array([ev['value'] for ev in speed_events])
         features['speed_mean'] = float(np.mean(sv))
@@ -456,13 +581,17 @@ def extract_features(chart_data):
     features['has_AT'] = 1 if n_flick > 0 else 0
 
     if n_notes > 4:
-        times_sec = np.array([time_to_seconds(t, bpm) for t in times])
+        times_sec = np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(times, note_bpms)])
         gaps_sec = np.diff(times_sec)
         features['max_gap_sec'] = float(np.max(gaps_sec))
 
     d4 = _density(4)
     if d4.size > 0:
         features['density_above_zero_ratio'] = float(np.sum(d4 > 0) / max(len(d4), 1))
+
+    # core (tap+hold) 版本
+    cd4 = _compute_window_density(core_times, 4) if core_times.size > 0 else np.array([])
+    features['core_density_above_zero_ratio'] = float(np.sum(cd4 > 0) / max(len(cd4), 1)) if cd4.size > 0 else 0
 
     features['hold_interference_index'] = _compute_hold_interference_fast(all_notes, times, positions, hold_mask, n_hold, dt)
 
@@ -475,6 +604,12 @@ def extract_features(chart_data):
             features[f'peak_density_top5avg_{w}beat'] = float(np.mean(sd[:top5_n]))
             features[f'density_spike_ratio_{w}beat'] = float(sd[0] / max(np.mean(d), 0.01))
             features[f'peak_density_{w}beat'] = float(sd[0])
+        # core (tap+hold) 版本
+        cd = _compute_window_density(core_times, w) if core_times.size > 0 else np.array([])
+        if cd.size > 0:
+            csd = np.sort(cd)[::-1]
+            ctop5_n = max(5, len(cd) // 20)
+            features[f'core_peak_density_top5avg_{w}beat'] = float(np.mean(csd[:ctop5_n]))
 
     # ====== burst ======
     if n_notes > 4:
@@ -490,25 +625,26 @@ def extract_features(chart_data):
             features['max_consecutive_burst'] = int(np.max(run_lengths)) if len(run_lengths) > 0 else 0
             features['burst_intensity_mean'] = float(np.mean(d_half[burst_mask])) if np.any(burst_mask) else 0
 
-    # ====== 滑动窗口峰值（1秒/0.5秒真实时间窗口，双指针法） ======
-    tap_t = times[tap_mask]
-    if len(tap_t) > 5:
-        tap_bpm_arr = np.array([n.get('bpm', bpm) for n in all_notes])[tap_mask]
-        tap_t_sec = np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(tap_t, tap_bpm_arr)])
-        tap_t_sec.sort()
+    # ====== 滑动窗口峰值（1秒/0.5秒真实时间窗口，双指针法，tap+hold = core TPS） ======
+    tps_mask = tap_mask | hold_mask
+    tps_t = times[tps_mask]
+    if len(tps_t) > 5:
+        tps_bpm_arr = np.array([n.get('bpm', bpm) for n in all_notes])[tps_mask]
+        tps_t_sec = np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(tps_t, tps_bpm_arr)])
+        tps_t_sec.sort()
         for win_name, win_sec in [('tps_1sec', 1.0), ('tps_05sec', 0.5)]:
             left = 0
             max_cnt = 0
-            for right in range(len(tap_t_sec)):
-                while tap_t_sec[right] - tap_t_sec[left] > win_sec:
+            for right in range(len(tps_t_sec)):
+                while tps_t_sec[right] - tps_t_sec[left] > win_sec:
                     left += 1
                 max_cnt = max(max_cnt, right - left + 1)
             features[f'peak_{win_name}'] = int(max_cnt)
-            if len(tap_t_sec) > 20:
+            if len(tps_t_sec) > 20:
                 counts = []
                 l = 0
-                for r in range(len(tap_t_sec)):
-                    while tap_t_sec[r] - tap_t_sec[l] > win_sec:
+                for r in range(len(tps_t_sec)):
+                    while tps_t_sec[r] - tps_t_sec[l] > win_sec:
                         l += 1
                     counts.append(r - l + 1)
                 counts.sort(reverse=True)
@@ -555,6 +691,12 @@ def extract_features(chart_data):
     else:
         features['core_peak_density_1sec'] = 0
         features['core_peak_density_1sec_top5avg'] = 0.0
+
+    # ====== 统一密度维度：√(总真实TPS × 1s峰值TPS) ======
+    # 两个值分别代表"持续密度"和"爆发密度"，几何平均确保两者都高时难度才高
+    rcnps = features.get('real_core_notes_per_second', 0)
+    cp1s = features.get('core_peak_density_1sec_top5avg', 0)
+    features['density_dimension'] = float(np.sqrt(max(rcnps, 0.01) * max(cp1s, 0.01)))
 
     # ====== 耐力指标：1秒窗口tps>平均*0.9 的秒数占比 ======
     stamina_mask = tap_mask | hold_mask  # 蓝键+长条 = core notes
@@ -629,42 +771,188 @@ def extract_features(chart_data):
         features['tempo_change_count'] = tempo_change
         features['tempo_change_ratio'] = tempo_change / max(len(intervals), 1)
 
-    # ====== 楼梯/Scale模式（使用真实秒数阈值） ======
+    # ====== 楼梯/Scale模式 v2（和弦感知 + 秒归一化 + 速度加权） ======
     if n_notes > 3:
-        stair_threshold_sec = 0.10
-        stair_events = 0
-        stair_climbs = 0
-        stair_total_steps = 0
+        duration_sec = features['duration_sec']  # 已用BPM时间线正确计算
+        
+        # Step 1: 按时间分组（5ms内=同一和弦事件），取中位数位置
+        times_sec_arr = np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(times, note_bpms)])
+        events = []  # [(time_sec, median_pos, chord_size)]
+        i = 0
+        while i < n_notes:
+            t0 = times_sec_arr[i]
+            group_positions = [positions[i]]
+            j = i + 1
+            while j < n_notes and (times_sec_arr[j] - t0) < 0.005:
+                group_positions.append(positions[j])
+                j += 1
+            events.append((t0, float(np.median(group_positions)), len(group_positions)))
+            i = j
+        
+        n_events = len(events)
+        if n_events >= 4:
+            event_times = np.array([e[0] for e in events])
+            event_positions = np.array([e[1] for e in events])
+            event_chord_sizes = np.array([e[2] for e in events])
+            
+            # 事件间间隔（秒）
+            event_intervals = np.diff(event_times)
+            
+            # Step 2: 检测楼梯段（连续同方向位移，间隔<0.15s）
+            stair_threshold = 0.15  # 最大间隔仍算同一楼梯段
+            stair_runs = []  # [(start_idx, end_idx, total_steps, direction_changes)]
+            
+            ei = 1
+            while ei < n_events:
+                if event_intervals[ei-1] < stair_threshold:
+                    dirs = []
+                    j = ei
+                    while j < n_events and event_intervals[j-1] < stair_threshold:
+                        dp = event_positions[j] - event_positions[j-1]
+                        if abs(dp) > 0.05:
+                            dirs.append(1 if dp > 0 else -1)
+                        else:
+                            dirs.append(0)
+                        j += 1
+                    
+                    if len(dirs) >= 3:
+                        # 统计方向变化
+                        dir_changes = sum(1 for k in range(1, len(dirs)) if dirs[k] != dirs[k-1] and dirs[k] != 0 and dirs[k-1] != 0)
+                        # 统计同方向连续步数（纯楼梯特征）
+                        same_dir_runs = 0
+                        cur_run = 0
+                        for k in range(1, len(dirs)):
+                            if dirs[k] == dirs[k-1] and dirs[k] != 0:
+                                cur_run += 1
+                            else:
+                                if cur_run >= 1:
+                                    same_dir_runs += cur_run + 1
+                                cur_run = 0
+                        if cur_run >= 1:
+                            same_dir_runs += cur_run + 1
+                        
+                        total_steps = len(dirs)
+                        stair_runs.append((ei, j, total_steps, dir_changes, same_dir_runs))
+                    ei = j
+                else:
+                    ei += 1
+            
+            if stair_runs:
+                # 汇总指标
+                total_stair_steps = sum(r[2] for r in stair_runs)
+                total_dir_changes = sum(r[3] for r in stair_runs)
+                total_same_dir = sum(r[4] for r in stair_runs)
+                
+                # 楼梯速度（步/秒）
+                features['stair_rate_per_sec'] = total_stair_steps / max(duration_sec, 0.01)
+                
+                # 楼梯复杂度：方向变化越多越难（山峰形 > 单边爬升）
+                features['stair_complexity'] = total_dir_changes / max(total_stair_steps, 1)
+                
+                # 同方向步数占比（纯楼梯特征，越高=越像传统楼梯）
+                features['stair_purity'] = total_same_dir / max(total_stair_steps, 1)
+                
+                # 楼梯速度加权：对高速楼梯段做额外加分
+                stair_speeds = []
+                for run in stair_runs:
+                    seg_start = run[0] - 1
+                    seg_end = min(run[1], n_events) - 1
+                    seg_dur = event_times[seg_end] - event_times[seg_start]
+                    if seg_dur > 0.001:
+                        stair_speeds.append(run[2] / seg_dur)
+                features['stair_speed_avg'] = float(np.mean(stair_speeds)) if stair_speeds else 0.0
+                features['stair_speed_max'] = float(np.max(stair_speeds)) if stair_speeds else 0.0
+                
+                # 和弦楼梯：楼梯段中涉及和弦（chord_size>1）的占比
+                chord_stair_events = 0
+                for run in stair_runs:
+                    for k in range(run[0]-1, min(run[1], n_events)):
+                        if event_chord_sizes[k] >= 2:
+                            chord_stair_events += 1
+                features['stair_chord_ratio'] = chord_stair_events / max(total_stair_steps, 1)
+                
+                # 保留兼容旧名
+                features['stair_total_steps'] = total_stair_steps
+                features['stair_climb_count'] = len(stair_runs)
+                features['stair_density'] = features['stair_rate_per_sec']  # 覆盖为秒归一化
+            else:
+                features.update({
+                    'stair_rate_per_sec': 0, 'stair_complexity': 0, 'stair_purity': 0,
+                    'stair_speed_avg': 0, 'stair_speed_max': 0, 'stair_chord_ratio': 0,
+                    'stair_total_steps': 0, 'stair_climb_count': 0, 'stair_density': 0,
+                })
+        else:
+            features.update({
+                'stair_rate_per_sec': 0, 'stair_complexity': 0, 'stair_purity': 0,
+                'stair_speed_avg': 0, 'stair_speed_max': 0, 'stair_chord_ratio': 0,
+                'stair_total_steps': 0, 'stair_climb_count': 0, 'stair_density': 0,
+            })
+    else:
+        features.update({
+            'stair_rate_per_sec': 0, 'stair_complexity': 0, 'stair_purity': 0,
+            'stair_speed_avg': 0, 'stair_speed_max': 0, 'stair_chord_ratio': 0,
+            'stair_total_steps': 0, 'stair_climb_count': 0, 'stair_density': 0,
+        })
+
+    # ====== 颤音/Trill密度（连续左右交替，参考ManiaMapAnalyser的Trill/Minitrill） ======
+    if n_notes > 3:
+        trill_threshold_sec = 0.10
+        trill_events = 0
+        trill_total_steps = 0
         i = 1
         while i < n_notes:
-            if intervals_sec[i-1] < stair_threshold_sec:
+            if intervals_sec[i-1] < trill_threshold_sec:
                 dirs = []
                 j = i
-                while j < n_notes and intervals_sec[j-1] < stair_threshold_sec:
+                while j < n_notes and intervals_sec[j-1] < trill_threshold_sec:
                     diff_pos = positions[j] - positions[j-1]
                     if abs(diff_pos) > 0.01:
                         dirs.append(1 if diff_pos > 0 else -1)
                     j += 1
                 if len(dirs) >= 3:
                     alt_count = sum(1 for k in range(1, len(dirs)) if dirs[k] != dirs[k-1])
+                    # 严格交替：每次方向都反转 = 纯颤音
                     if alt_count >= len(dirs) - 1:
-                        stair_events += 1
-                        stair_total_steps += len(dirs)
-                    else:
-                        climb = sum(1 for k in range(1, len(dirs)) if dirs[k] == dirs[k-1])
-                        if climb >= 2:
-                            stair_climbs += 1
-                            stair_total_steps += len(dirs)
+                        trill_events += 1
+                        trill_total_steps += len(dirs)
                 i = j
             else:
                 i += 1
-        features['stair_event_count'] = stair_events
-        features['stair_climb_count'] = stair_climbs
-        features['stair_total_steps'] = stair_total_steps
-        features['stair_density'] = stair_total_steps / max(dt, 0.01)
+        features['trill_event_count'] = trill_events
+        features['trill_total_steps'] = trill_total_steps
+        features['trill_density'] = trill_total_steps / max(dt, 0.01)
     else:
-        features.update({'stair_event_count': 0, 'stair_climb_count': 0,
-                         'stair_total_steps': 0, 'stair_density': 0})
+        features.update({'trill_event_count': 0, 'trill_total_steps': 0, 'trill_density': 0})
+
+    # ====== 纵连密度（jack density — 同位置连续击打频率） ======
+    if n_notes > 3:
+        jack_events = 0
+        jack_total_steps = 0
+        i = 1
+        while i < n_notes:
+            if intervals_sec[i-1] < jack_threshold_sec:
+                j = i
+                same_pos_run = 0
+                while j < n_notes and intervals_sec[j-1] < jack_threshold_sec:
+                    if abs(positions[j] - positions[j-1]) < 0.01 and jl_idx[j] == jl_idx[j-1]:
+                        same_pos_run += 1
+                    else:
+                        if same_pos_run >= 2:
+                            jack_events += 1
+                            jack_total_steps += same_pos_run + 1
+                        same_pos_run = 0
+                    j += 1
+                if same_pos_run >= 2:
+                    jack_events += 1
+                    jack_total_steps += same_pos_run + 1
+                i = j
+            else:
+                i += 1
+        features['jack_event_count'] = jack_events
+        features['jack_total_steps'] = jack_total_steps
+        features['jack_density'] = jack_total_steps / max(dt, 0.01)
+    else:
+        features.update({'jack_event_count': 0, 'jack_total_steps': 0, 'jack_density': 0})
 
     # ====== 左右分布 ======
     act_mask = tap_mask | flick_mask
@@ -786,6 +1074,37 @@ def extract_features(chart_data):
     else:
         features['position_entropy'] = 0
 
+    # ====== 位置聚类 & 离轨度（反映谱面是"定轨"还是"散乱"） ======
+    if len(positions) > 10:
+        # 用K-means-like方法：以0.5为步长扫描，统计"虚拟轨道"数量
+        # 轨道定义为：在该positionX附近聚集了足够多音符的区域
+        bucket_size = 0.3
+        pos_buckets = defaultdict(int)
+        for p in positions:
+            bucket = round(p / bucket_size) * bucket_size
+            pos_buckets[bucket] += 1
+        # 显著轨道：该bucket内音符数 >= 总音符的3%
+        sig_threshold = max(n_notes * 0.03, 3)
+        significant_tracks = sum(1 for cnt in pos_buckets.values() if cnt >= sig_threshold)
+        features['position_cluster_count'] = significant_tracks
+
+        # 离轨度：每个音符到最近"轨道中心"的距离的平均值
+        if significant_tracks > 0:
+            track_centers = sorted([k for k, cnt in pos_buckets.items() if cnt >= sig_threshold])
+            if track_centers:
+                deviations = []
+                for p in positions:
+                    min_dist = min(abs(p - tc) for tc in track_centers)
+                    deviations.append(min_dist)
+                features['track_deviation_score'] = float(np.mean(deviations))
+            else:
+                features['track_deviation_score'] = 0.0
+        else:
+            features['track_deviation_score'] = 0.0
+    else:
+        features['position_cluster_count'] = 0
+        features['track_deviation_score'] = 0.0
+
     # ====== 单指 TPS (per-finger TPS, 参考osu!mania定轨分析) ======
     # 区分: 拍拍谱(多指和弦交替, 单指负载低) vs 交互谱(单点交替, 单指负载高)
     # 将位置离散化为6个"手指"通道, 滑动窗口统计各通道密度
@@ -820,6 +1139,169 @@ def extract_features(chart_data):
             features.update({'finger_peak_tps': 0, 'finger_avg_peak_tps': 0, 'finger_vs_total_ratio': 0})
     else:
         features.update({'finger_peak_tps': 0, 'finger_avg_peak_tps': 0, 'finger_vs_total_ratio': 0})
+
+    # ====== 型切换频率（pattern switch rate） ======
+    # FIX: 用0.5秒滑动窗口替代1拍窗口，加权不同型之间的切换烈度
+    if n_notes > 10:
+        window_sec = 0.5
+        seg_labels = []
+        step_sec = 0.25  # 滑动步长
+        cur_sec = 0.0
+        ts_sec = times_sec.copy() if 'times_sec' in dir() else np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(times, note_bpms)])
+        t_end_sec = float(ts_sec[-1])
+        while cur_sec + window_sec <= t_end_sec:
+            win_end_sec = cur_sec + window_sec
+            m = (ts_sec >= cur_sec) & (ts_sec < win_end_sec)
+            n_win = int(np.sum(m))
+            if n_win <= 1:
+                seg_labels.append('空')
+            else:
+                w_pos = positions[m]
+                w_times_beat = times[m]
+                chord_count = 0
+                for k in range(1, n_win):
+                    if w_times_beat[k] - w_times_beat[k-1] < 0.0625:  # 放宽到1/16拍
+                        chord_count += 1
+                if chord_count >= n_win * 0.25:
+                    seg_labels.append('和弦')
+                else:
+                    dirs = []
+                    jacks = 0
+                    for k in range(1, n_win):
+                        diff = w_pos[k] - w_pos[k-1]
+                        if abs(diff) < 0.02:
+                            jacks += 1
+                        elif diff > 0:
+                            dirs.append(1)
+                        else:
+                            dirs.append(-1)
+                    if jacks >= n_win * 0.4:
+                        seg_labels.append('纵连')
+                    elif len(dirs) >= 3:
+                        alt_count = sum(1 for k in range(1, len(dirs)) if dirs[k] != dirs[k-1])
+                        if alt_count >= len(dirs) * 0.8:
+                            seg_labels.append('颤音')
+                        elif alt_count == 0:
+                            seg_labels.append('楼梯')
+                        else:
+                            seg_labels.append('流谱')
+                    elif len(dirs) >= 2:
+                        if all(d == dirs[0] for d in dirs):
+                            seg_labels.append('楼梯')
+                        else:
+                            seg_labels.append('流谱')
+                    elif len(dirs) == 1:
+                        seg_labels.append('流谱')
+                    else:
+                        seg_labels.append('单点')
+            cur_sec += step_sec
+
+        # 统计型切换次数并加权烈度
+        if len(seg_labels) > 1:
+            # 定义切换烈度权重：型差距越大权重越高
+            severity = {
+                ('空',): 0,
+                ('单点', '空'): 0.5, ('流谱', '空'): 0.5, ('空', '流谱'): 0.5, ('空', '单点'): 0.5,
+                ('流谱', '楼梯'): 0.7, ('楼梯', '流谱'): 0.7,
+                ('流谱', '颤音'): 0.8, ('颤音', '流谱'): 0.8,
+                ('流谱', '和弦'): 0.9, ('和弦', '流谱'): 0.9,
+                ('楼梯', '颤音'): 0.9, ('颤音', '楼梯'): 0.9,
+                ('流谱', '纵连'): 1.0, ('纵连', '流谱'): 1.0,
+                ('楼梯', '和弦'): 1.0, ('和弦', '楼梯'): 1.0,
+                ('颤音', '和弦'): 1.2, ('和弦', '颤音'): 1.2,
+                ('纵连', '和弦'): 1.2, ('和弦', '纵连'): 1.2,
+                ('颤音', '纵连'): 1.3, ('纵连', '颤音'): 1.3,
+            }
+            switches = 0
+            weighted = 0.0
+            for i in range(1, len(seg_labels)):
+                a, b = seg_labels[i-1], seg_labels[i]
+                if a == b:
+                    continue
+                if a == '空' and b == '空':
+                    continue
+                key = tuple(sorted([a, b]))
+                w = severity.get(key, 0.8)
+                if w > 0:
+                    switches += 1
+                    weighted += w
+            features['pattern_switch_count'] = switches
+            features['pattern_switch_rate'] = switches / max(len(seg_labels) * step_sec, 0.01)
+        else:
+            features['pattern_switch_count'] = 0
+            features['pattern_switch_rate'] = 0.0
+    else:
+        features['pattern_switch_count'] = 0
+        features['pattern_switch_rate'] = 0.0
+
+    # ====== 和弦交替率（chord→single→chord frequency） ======
+    if n_notes > 5:
+        chord_alt_count = 0
+        in_chord = False
+        # 用0.01拍作为同位判定
+        for i in range(1, n_notes):
+            if times[i] - times[i-1] < 0.02:
+                if not in_chord:
+                    in_chord = True
+            else:
+                if in_chord:
+                    chord_alt_count += 1
+                    in_chord = False
+        features['chord_alternation_rate'] = chord_alt_count / max(ds, 0.01)
+    else:
+        features['chord_alternation_rate'] = 0.0
+
+    # ====== 方向不规则度（direction change entropy — 高阶方向变化的熵） ======
+    if n_notes > 5:
+        dirs = []
+        pos_prev = float(positions[0])
+        for i in range(1, n_notes):
+            d = float(positions[i]) - pos_prev
+            if abs(d) > 0.01:
+                dirs.append(1 if d > 0 else -1)
+            pos_prev = float(positions[i])
+        if len(dirs) >= 4:
+            # 二阶方向变化：看相邻一阶方向是相同还是相反
+            second_order = []
+            for i in range(1, len(dirs)):
+                so = 1 if dirs[i] == dirs[i-1] else -1
+                second_order.append(so)
+            if second_order:
+                from collections import Counter
+                cnt = Counter(second_order)
+                total = len(second_order)
+                p_same = cnt.get(1, 0) / total
+                p_diff = cnt.get(-1, 0) / total
+                # 越接近p=0.5越不规则（纯随机=高熵），越接近p=1=平滑流（低熵）
+                def safe_entropy(p):
+                    if p <= 0 or p >= 1:
+                        return 0
+                    return -p * np.log2(p)
+                features['direction_irregularity'] = float(safe_entropy(p_same) + safe_entropy(p_diff))
+            else:
+                features['direction_irregularity'] = 0.0
+        else:
+            features['direction_irregularity'] = 0.0
+    else:
+        features['direction_irregularity'] = 0.0
+
+    # ====== 位置熵（position entropy — 音符在x轴分布的不均匀度） ======
+    if n_notes > 3:
+        # 将x轴分为20个bucket，计算分布熵
+        x_buckets = np.linspace(-1.0, 1.0, 21)
+        x_indices = np.digitize(positions, x_buckets) - 1
+        x_indices = np.clip(x_indices, 0, 19)
+        bucket_counts = np.bincount(x_indices, minlength=20)
+        probs = bucket_counts / n_notes
+        probs = probs[probs > 0]
+        features['position_entropy'] = float(-np.sum(probs * np.log2(probs + 1e-10)))
+        # 位置范围（实际使用的x范围，归一化）
+        x_min, x_max = float(np.min(positions)), float(np.max(positions))
+        x_span = max(abs(x_max), abs(x_min))
+        features['position_range_used'] = (x_max - x_min) / max(x_span * 2.0, 0.1)
+    else:
+        features['position_entropy'] = 0.0
+        features['position_range_used'] = 0.0
 
     return features
 
@@ -862,6 +1344,9 @@ def _compute_simultaneous_notes(notes):
     mf = {'count_3plus': 0, 'count_4plus': 0, 'max_simultaneous': 0}
     chord_sizes = {2: 0, 3: 0, 4: 0, 5: 0}
     pos_spreads = []
+    weighted_mf_scores = []  # 加权多指协调分（区分流式/离散）
+    discrete_mf_count = 0    # 离散型多指事件计数
+    total_mf_events = 0      # 多指事件总数
 
     for tk, notes_in_window in windows.items():
         sz = len(notes_in_window)
@@ -878,12 +1363,31 @@ def _compute_simultaneous_notes(notes):
             key = min(sz, 5)
             chord_sizes[key] = chord_sizes.get(key, 0) + 1
             p = [n.get('positionX', 0) for n in notes_in_window]
-            pos_spreads.append(max(p) - min(p))
+            spread = max(p) - min(p)
+            pos_spreads.append(spread)
+            
+            # 加权多指协调分：归一化跨度 = 总跨度 / (指头数-1)
+            # 流式（1,2,3 → spread=2, sz=3 → norm=1.0）：简单
+            # 离散（1,4,7 → spread=6, sz=3 → norm=3.0）：困难
+            # 双指宽押（1,9 → spread=8, sz=2 → norm=8.0）：极难协调
+            norm_spread = spread / max(sz - 1, 1)
+            # 用sz加权：越大越多指越难，但是要用sqrt避免过度放大
+            score = norm_spread * (sz ** 0.5)
+            weighted_mf_scores.append(score)
+            
+            if sz >= 2:
+                total_mf_events += 1
+                if norm_spread > 1.5:  # 离散型：平均每个指头间距 > 1.5 轨道
+                    discrete_mf_count += 1
 
     return {
         'max': max_sim, 'avg': total_sim / max(event_count, 1),
         'event_count': event_count, 'multi_finger_events': mf,
         'chord_sizes': chord_sizes, 'pos_spreads': pos_spreads,
+        'weighted_mf_score_total': sum(weighted_mf_scores),
+        'weighted_mf_score_mean': float(np.mean(weighted_mf_scores)) if weighted_mf_scores else 0,
+        'discrete_mf_ratio': discrete_mf_count / max(total_mf_events, 1),
+        'total_mf_events': total_mf_events,
     }
 
 

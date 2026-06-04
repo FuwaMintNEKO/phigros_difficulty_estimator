@@ -1,164 +1,96 @@
-# Phigros 难度定数预测器
+# Phigros 难度定数预测系统
 
-基于 **Gradient Boosting + 特征外推 (Boost)** 混合模型的 Phigros 谱面难度预测系统。
+基于梯度提升回归(GradientBoostingRegressor)的Phigros谱面定数预测系统，支持官谱/RPE/RPE v3三种格式自动检测与解析。
 
-**核心思路：** GB 模型学习"常规"难度映射，Boost 机制捕捉极端谱面的尾部难度，两者叠加得到最终定数。
+## 模型版本
+
+| 版本 | MAE | 训练数据 | 核心改进 |
+|------|-----|----------|----------|
+| v7.1 | 0.589 | 957官谱 | 维度均衡(配置×0.55/读谱×2.0)，sigmoid压缩 |
+| v7.2 | 0.589 | 957官谱 | BPM解析修复(per-line BPM、RPE变速保留) |
+| **v7.3** | **0.406** | **349 IN/AT官谱** | **Ridge数据驱动co学习 + 迭代重训GB** |
 
 ## 快速开始
 
-### 环境要求
-
-- Python 3.10+
-- pip
-
-### 安装
-
 ```bash
-# 克隆仓库
-git clone https://github.com/FuwaMintNEKO/phigros_difficulty_estimator.git
-cd phigros_difficulty_estimator
-
-# 安装依赖
-pip install -r requirements.txt
-```
-
-依赖只有三个：`Flask`、`numpy`、`scikit-learn`。
-
-### 启动 Web 服务
-
-```bash
+pip install flask numpy scikit-learn
 python app.py
+# 访问 http://127.0.0.1:5000
 ```
-
-默认监听 `http://0.0.0.0:5000`。可用参数：
-
-```bash
-python app.py --host 127.0.0.1 --port 8080     # 改地址和端口
-python app.py --debug                          # 调试模式
-```
-
-### 使用
-
-1. 浏览器打开 `http://127.0.0.1:5000`
-2. 拖拽谱面 JSON 文件（官谱/RPE 格式）或 ZIP 压缩包到上传区
-3. 支持批量上传，点击「开始预测」
-4. 展开详情可查看 **5 大类别贡献值**、**原始特征值**、**特征明细表格**
-
-![webui](screenshot_webui.png)
-
-### 特征说明
-
-页面直方图显示两类数值：
-
-| 位置 | 含义 | 示例 |
-|------|------|------|
-| **上方数值** | 该类别的 Boost 贡献值 | `0.44` |
-| **下方数值（含单位）** | 该类别主特征的原始值 | `8.56 键/秒 (TPS)` |
-
-5 大类别：
-
-| 类别 | 核心特征 | 单位 |
-|------|---------|------|
-| 密度 | 核心音符密度 (tap+hold) | 键/秒 |
-| 1smax密度 | 1 秒窗口核心音符峰值 | 键/秒 |
-| 平均位移 | 每秒位移量 | 格/秒 |
-| 耐力 | tap 密度 + stamina 比 | 键/秒 |
-| 读谱 | 节奏复杂度 + BPM 变化 | - |
-
-## 模型架构
-
-```
-输入谱面 JSON → 特征提取 (240维) → GB 预测残差 + 特征外推 Boost
-                                                   ↓
-                                       动态 Cap (MM曲线)
-                                                   ↓
-                                              最终定数
-```
-
-- **GB 模型：** GradientBoostingRegressor (600 棵树, max_depth=5, lr=0.05)
-- **动态 Cap：** 指数衰减，`knee=2.5, power=0.9`（超出部分开 0.9 次方，无硬上限）
-- **训练数据：** 957 张官谱
-- **特征数量：** 240 个原始特征 → 28 个平铺特征
-- **测试表现：** 20 张测试谱平均误差 0.193，15/20 < 0.3
-
-### API
-
-除了 Web UI，还提供 JSON API：
-
-**`POST /predict`** — 批量预测（multipart/form-data）
-```bash
-curl -F "files=@chart.json" http://127.0.0.1:5000/predict
-```
-
-**`POST /predict_one`** — 单谱预测（application/json，供 Android 悬浮窗使用）
-```bash
-curl -X POST http://127.0.0.1:5000/predict_one \
-  -H "Content-Type: application/json" \
-  -d @chart.json
-```
-
-## 手机部署（Termux）
-
-参考 [deploy_termux.sh](deploy_termux.sh) 一键部署，或在 Termux 中：
-
-```bash
-pkg update -y
-pkg install -y python python-pip
-pip install Flask numpy scikit-learn
-git clone https://github.com/FuwaMintNEKO/phigros_difficulty_estimator.git
-cd phigros_difficulty_estimator
-python app.py --host 0.0.0.0 --port 5000
-```
-
-## 重新训练
-
-如果你有自己的谱面数据集想重新训练：
-
-```bash
-# 确保 data_loader.py 配置了正确的数据路径
-python train_5dim_v4.py
-```
-
-训练完成后会自动保存新模型到 `models/5dim_model_v5_3.pkl`。
-
-## 测试评估
-
-```bash
-python evaluate_standalone.py
-```
-
-会输出 22 个测试谱面的预测结果与预期值对比表。
 
 ## 项目结构
 
 ```
-├── app.py                   # Flask Web 服务器（主入口）
-├── feature_extractor.py     # 特征提取模块（240维）
-├── predict_rpe.py           # RPE 谱面格式解析
-├── unified_parser.py        # 统一谱面解析器
-├── data_loader.py           # 数据加载
-├── train_5dim_v4.py         # 训练脚本（当前版本 v5.3）
-├── evaluate_standalone.py   # 测试评估脚本
-├── requirements.txt         # Python 依赖
-├── deploy_termux.sh         # Termux 手机部署脚本
+├── app.py                 # Flask Web应用入口
+├── feature_extractor.py   # 特征提取（5维：密度/位移/配置/耐力/读谱）
+├── unified_parser.py      # 统一谱面解析器（官谱/RPE/RPE v3自动检测）
+├── predict_rpe.py         # RPE→标准格式转换
+├── data_loader.py         # 官谱数据加载
+├── train_6dim_v7_3.py     # v7.3训练脚本（Ridge迭代优化）
 ├── templates/
-│   └── index.html           # Web 前端
-└── models/
-    └── 5dim_model_v5_3.pkl  # 当前模型
+│   └── index.html         # 前端界面
+├── models/
+│   ├── 6dim_model_v7_3.pkl          # v7.3模型（当前使用）
+│   └── 6dim_model_v7_3_backup.pkl   # 备份
+└── 📂 _analyze_*.py       # 分析/诊断脚本
 ```
+
+## 预测原理
+
+### 特征体系（5大维度）
+
+| 维度 | 代表特征 | 含义 |
+|------|----------|------|
+| 密度 | `density_dimension = √(持续TPS × 峰值TPS)` | √(真实密度 × 爆发密度) |
+| 平均位移 | `movement_per_second` | 判定线移动幅度 |
+| 配置 | `stair_density`, `chord_size_entropy`, `multi_finger_3plus` | 键型复杂度 |
+| 耐力 | `stamina_ratio`, `tap_per_second`, `total_notes` | 体力消耗 |
+| 读谱 | `density_transition_mean`, `offbeat_ratio`, `rhythm_entropy` | 读谱难度 |
+
+### 预测流程
+
+```
+谱面JSON → 特征提取 → GB基线预测 → Boost加成 → sigmoid压缩 → 最终定数
+```
+
+- **GB** (GradientBoosting): 从219个特征预测基线难度
+- **Boost**: 对超出P95阈值的特征累加贡献（co由Ridge从IN/AT官谱学习）
+- **Sigmoid**: 当boost/GB比值过高时平滑压缩（target=0.24, power=0.70, thresh=0.24）
+
+## 谱面格式支持
+
+| 格式 | 说明 | 自动检测规则 |
+|------|------|------------|
+| 官谱/Standard | 标准Phigros JSON | `judgeLineList`包含`notesAbove/notesBelow` |
+| RPE普通 | RPE编辑器格式 | `META.RPEVersion`存在 |
+| RPE v3 | 愚人节单线谱 | 某线notes>800且有移动事件 |
+| PE格式 | 纯文本谱面 | 不以`{`开头 |
 
 ## 更新日志
 
-### v5.3 (2026-06-03)
-- **动态 Cap 重构**：将 Michaelis-Menten 曲线替换为**指数衰减策略**。
-  - 低于 knee (2.5) 的部分保持线性
-  - 超出部分 `excess ^ 0.9` 加到结果上，无硬上限
-  - 真正的高难谱面（如 People people、Galaxy Collapse）不再被过度压缩
-- **训练 R²=0.9564** (v5.2: 0.9535) | **训练 MAE=0.6735** (v5.2: 0.695)
-- **测试 20 谱平均误差=0.193**，15/20 < 0.3
+### v7.3 (当前)
+- Ridge数据驱动：从IN/AT官谱学习最优co值，替代手调权重
+- 迭代重训GB：co更新后重新拟合GB残差，3轮收敛
+- MAE: 0.406（测试集17谱，正偏8/负偏8）
 
-### v5.2 (2026-06-03)
-- 密度特征从 NPS 改为 TPS（核心音符：tap+hold）
-- 旧密度退化为辅助小特征
-- 训练 R²=0.9535
+### v7.2
+- 修复`predict_rpe.py`：RPE转换时保留BPMList
+- 修复`feature_extractor.py`：无BPMList时每条线使用自己的BPM
+- 修复`_parse_bpm_timeline`：兼容float格式startTime
+- 前端BPM显示改为范围（如Apollo: 180~339）
+
+### v7.1
+- 维度均衡因子：配置×0.55, 读谱×2.0等
+- Sigmoid平滑压缩引入
+
+## 网页部署
+
+```bash
+# 开发模式
+python app.py
+
+# 生产模式（Linux）
+gunicorn -w 4 -b 0.0.0.0:5000 app:app
 ```
+
+上传谱面文件（支持.json/.zip批量），点击"开始预测"即可。
