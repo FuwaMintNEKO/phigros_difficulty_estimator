@@ -123,7 +123,8 @@ def collect_speed_events(judge_lines):
     return all_events
 
 
-def extract_features(chart_data):
+def extract_features(chart_data, speed=1.0):
+    """speed: 倍速缩放因子，用于调整所有秒级阈值（1/speed倍）"""
     all_notes, judge_lines, bpm_timeline = collect_all_notes(chart_data)
     if not all_notes:
         return None
@@ -187,11 +188,13 @@ def extract_features(chart_data):
     features['core_notes_per_beat'] = core_n / max(dt, 0.01)
 
     # ====== 真实密度（排除 >1s 间隙，反映击打时真实密度水平） ======
+    # 倍速时阈值等比缩放：2x速下0.5秒的间隙就相当于原速1秒
+    rest_gap_threshold = 1.0 / speed
     all_t_sec = np.array([time_to_seconds(t, max(n.get('bpm', bpm), 1.0)) for t, n in zip(times, all_notes)])
     all_t_sec.sort()
     if n_notes > 1:
         gaps = np.diff(all_t_sec)
-        big_gaps = gaps[gaps > 1.0]
+        big_gaps = gaps[gaps > rest_gap_threshold]
         rest_duration = float(np.sum(big_gaps))
         real_active = max(all_t_sec[-1] - all_t_sec[0] - rest_duration, 0.01)
     else:
