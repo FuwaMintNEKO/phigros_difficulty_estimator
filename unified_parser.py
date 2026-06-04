@@ -110,7 +110,7 @@ def _convert_rpe_v3_to_standard(data):
 
     if pos_range < 0.01:
         # 所有note在同一位置，退化为单线
-        return {
+        result = {
             'formatVersion': 3,
             'offset': data.get('offset', 0),
             'judgeLineList': [{
@@ -120,6 +120,9 @@ def _convert_rpe_v3_to_standard(data):
                 'speedEvents': jls[0].get('speedEvents', []) if jls else [],
             }]
         }
+        if 'META' in data:
+            result['META'] = data['META']
+        return result
 
     # 将positionX范围分成N个虚拟线
     bin_width = pos_range / RPEV3_VIRTUAL_LANES
@@ -140,11 +143,14 @@ def _convert_rpe_v3_to_standard(data):
         idx = min(RPEV3_VIRTUAL_LANES - 1, max(0, int((px - pos_min) / bin_width)))
         virtual_lines[idx]['notesAbove'].append(note)
 
-    return {
+    result = {
         'formatVersion': 3,
         'offset': data.get('offset', 0),
         'judgeLineList': virtual_lines,
     }
+    if 'META' in data:
+        result['META'] = data['META']
+    return result
 
 
 def load_chart(filepath):

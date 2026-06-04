@@ -1,4 +1,4 @@
-import os, sys, json, pickle, io, zipfile, numpy as np
+import os, sys, json, pickle, io, zipfile, copy, numpy as np
 from flask import Flask, request, jsonify, render_template
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -123,8 +123,26 @@ def extract_pe_name(text):
     return ''
 
 
+# ====== 倍速功能: 缩放 BPM ======
+def apply_speed_multiplier(chart_data, speed):
+    """深拷贝谱面数据，将所有BPM乘以speed倍率"""
+    if speed == 1.0:
+        return chart_data
+    data = copy.deepcopy(chart_data)
+    # 缩放每条判定线的bpm
+    for jl in data.get('judgeLineList', []):
+        if 'bpm' in jl:
+            jl['bpm'] = jl['bpm'] * speed
+    # 缩放 BPMList
+    for entry in data.get('BPMList', []):
+        if 'bpm' in entry:
+            entry['bpm'] = entry['bpm'] * speed
+    return data
+
+
 # ====== 单谱预测 ======
-def predict_one_chart(chart_data):
+def predict_one_chart(chart_data, speed=1.0):
+    chart_data = apply_speed_multiplier(chart_data, speed)
     feats = extract_features(chart_data)
     if not feats:
         return None, '特征提取失败'
@@ -228,6 +246,12 @@ def predict():
     force_format = request.form.get('format', 'auto')
     if force_format == 'auto':
         force_format = None
+    # 读取倍速参数
+    try:
+        speed = float(request.form.get('speed', '1.0'))
+        speed = max(0.5, min(2.0, speed))  # 限制范围 0.5~2.0
+    except (ValueError, TypeError):
+        speed = 1.0
 
     results = []
     errors = []
@@ -260,7 +284,7 @@ def predict():
                         if not internal_name and raw_text:
                             internal_name = extract_pe_name(raw_text)
                         chart_name = format_chart_name(name, internal_name)
-                        result, err = predict_one_chart(chart_data)
+                        result, err = predict_one_chart(chart_data, speed)
                         if result:
                             result['source_file'] = f.filename
                             result['chart_name'] = chart_name
@@ -284,7 +308,7 @@ def predict():
                 if not internal_name and raw_text:
                     internal_name = extract_pe_name(raw_text)
                 chart_name = format_chart_name(f.filename, internal_name)
-                result, err = predict_one_chart(chart_data)
+                result, err = predict_one_chart(chart_data, speed)
                 if result:
                     result['source_file'] = f.filename
                     result['chart_name'] = chart_name

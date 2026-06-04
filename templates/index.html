@@ -85,8 +85,8 @@ header .badge { display: inline-block; background: #e94560; color: #fff; font-si
 <body>
 <div class="container">
     <header>
-        <h1>Phigros 难度定数预测 <span class="badge">v7.1</span></h1>
-        <p>5大维度均衡(配置×0.55/读谱×2.0/密度×1.2/位移×1.1) · 统一密度=√(总TPS×峰值) · 型识别+多指协调+位置熵 · 批量上传</p>
+        <h1>Phigros 难度定数预测 <span class="badge">v7.3</span></h1>
+        <p>Ridge数据驱动 · BPM变速修复 · 真名显示 · 倍速模拟 · 批量上传</p>
     </header>
 
     <div class="drop-zone" id="dropZone">
@@ -113,6 +113,13 @@ header .badge { display: inline-block; background: #e94560; color: #fff; font-si
                 <option value="pe">PE格式</option>
             </select>
         </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+            <label for="speedSlider" style="font-size:12px;color:#888;">倍速:</label>
+            <input type="range" id="speedSlider" min="0.5" max="2.0" step="0.1" value="1.0"
+                style="width:80px;accent-color:#e94560;"
+                oninput="onSpeedChange();">
+            <span id="speedVal" style="color:#e0e0e8;font-size:13px;min-width:35px;">1.0x</span>
+        </div>
     </div>
 
     <div id="statsContainer"></div>
@@ -123,6 +130,13 @@ header .badge { display: inline-block; background: #e94560; color: #fff; font-si
 
 <script>
 let uploadedFiles = [];
+let speedDebounceTimer = null;
+
+function onSpeedChange() {
+    document.getElementById('speedVal').textContent = document.getElementById('speedSlider').value + 'x';
+    if (speedDebounceTimer) clearTimeout(speedDebounceTimer);
+    speedDebounceTimer = setTimeout(doPredict, 400);
+}
 
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
@@ -200,6 +214,8 @@ async function doPredict() {
     uploadedFiles.forEach(f => formData.append('files[]', f));
     const format = document.getElementById('formatSelect').value;
     formData.append('format', format);
+    const speed = document.getElementById('speedSlider').value;
+    formData.append('speed', speed);
 
     try {
         const resp = await fetch('/predict', { method: 'POST', body: formData });

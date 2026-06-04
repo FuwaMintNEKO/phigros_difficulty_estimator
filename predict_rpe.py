@@ -22,6 +22,10 @@ def convert_rpe_to_standard(rpe_data):
 
     data = {'formatVersion': 3, 'offset': rpe_data.get('offset', 0), 'judgeLineList': []}
 
+    # 保留 META 信息（曲名、曲师、谱师、定数等）
+    if 'META' in rpe_data:
+        data['META'] = rpe_data['META']
+
     # 保留 BPMList（变速谱的关键数据）
     bpm_list = rpe_data.get('BPMList', [])
     if bpm_list:
