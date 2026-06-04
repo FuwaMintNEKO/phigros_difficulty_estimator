@@ -123,8 +123,7 @@ def collect_speed_events(judge_lines):
     return all_events
 
 
-def extract_features(chart_data, speed=1.0):
-    """speed: 倍速缩放因子，用于调整所有秒级阈值（1/speed倍）"""
+def extract_features(chart_data):
     all_notes, judge_lines, bpm_timeline = collect_all_notes(chart_data)
     if not all_notes:
         return None
@@ -187,24 +186,30 @@ def extract_features(chart_data, speed=1.0):
     features['core_notes_per_second'] = core_n / ds
     features['core_notes_per_beat'] = core_n / max(dt, 0.01)
 
-    # ====== 真实密度（排除 >1s 间隙，反映击打时真实密度水平） ======
-    # 倍速时阈值等比缩放：2x速下0.5秒的间隙就相当于原速1秒
-    rest_gap_threshold = 1.0 / speed
+    # ====== 真实密度（排除 >=2拍 间隙，BPM无关的休息段定义） ======
+    REST_TICK_THRESHOLD = 64  # 2拍 = 64ticks(1tick=1/32拍)，BPM无关
     all_t_sec = np.array([time_to_seconds(t, max(n.get('bpm', bpm), 1.0)) for t, n in zip(times, all_notes)])
-    all_t_sec.sort()
     if n_notes > 1:
-        gaps = np.diff(all_t_sec)
-        big_gaps = gaps[gaps > rest_gap_threshold]
-        rest_duration = float(np.sum(big_gaps))
-        real_active = max(all_t_sec[-1] - all_t_sec[0] - rest_duration, 0.01)
+        # 按tick排序后计算拍间隔，识别>=2拍的休息段
+        sort_idx = np.argsort(times)
+        sorted_times = times[sort_idx]
+        tick_gaps = np.diff(sorted_times)
+        rest_mask = tick_gaps >= REST_TICK_THRESHOLD
+        # 将休息段的拍数转回秒数（用对应的BPM）
+        rest_ticks = float(np.sum(tick_gaps[rest_mask]))
+        rest_beats = rest_ticks / 32.0
+        # 平均BPM近似：用第一条线的bpm
+        rest_duration = rest_beats / bpm * 60.0
+        real_active_ticks = float(sorted_times[-1] - sorted_times[0] - rest_ticks)
+        real_active = real_active_ticks / 32.0 / bpm * 60.0
     else:
         rest_duration = 0.0
         real_active = max(ds, 0.01)
     features['real_active_sec'] = float(real_active)
     features['rest_duration_sec'] = float(rest_duration)
     features['rest_ratio'] = float(rest_duration / max(ds, 0.01))
-    features['real_core_notes_per_second'] = core_n / real_active  # 真实核心TPS
-    features['real_notes_per_second'] = n_notes / real_active  # 真实NPS
+    features['real_core_notes_per_second'] = core_n / max(real_active, 0.01)  # 真实核心TPS
+    features['real_notes_per_second'] = n_notes / max(real_active, 0.01)  # 真实NPS
 
     # ====== 窗口密度（缓存避免重复计算） ======
     _density_cache = {}
