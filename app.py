@@ -51,8 +51,8 @@ def _dynamic_cap(raw):
 
 
 def compute_boost(feats, speed=1.0):
-    """6大类别boost计算，返回总boost、类别分数、原始值和贡献明细
-    speed倍速: 1x exp=0.70, 2x exp=0.85 → boost对速度更敏感"""
+    """6大类别boost计算。excess指数随speed线性增加(1x=0.70, 2x=0.85)"""
+    excess_exp = 0.70 + 0.15 * (speed - 1.0)
     CATEGORIES = {
         '密度': ['density_dimension', 'core_peak_density_1sec_top5avg', 'core_peak_density_top5avg_1beat'],
         '平均位移': ['movement_per_second', 'burst_avg_movement', 'wide_jump_density', 'sim_pos_spread_max'],
@@ -145,7 +145,7 @@ def apply_speed_multiplier(chart_data, speed):
 
 # ====== 单谱预测 ======
 def predict_one_chart(chart_data, speed=1.0):
-    """变速预测：GB始终用1x特征（结构基线），boost用变速特征"""
+    """变速预测：GB始终用1x特征，boost用变速特征"""
     # GB: 始终用 1x 特征（GB只在训练分布内有效）
     feats_1x = extract_features(chart_data, speed=1.0)
     if not feats_1x:
@@ -154,12 +154,12 @@ def predict_one_chart(chart_data, speed=1.0):
     xs = scaler.transform(x)
     p_gb = float(gb.predict(xs)[0])
 
-    # Boost: 用变速特征
+    # Boost: 变速特征
     if speed != 1.0:
         chart_data_scaled = apply_speed_multiplier(chart_data, speed)
         feats_boost = extract_features(chart_data_scaled, speed=speed)
     else:
-        feats_boost = feats_1x
+        feats_boost = extract_features(chart_data, speed=1.0)
 
     if not feats_boost:
         return None, '特征提取失败'
