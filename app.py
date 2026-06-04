@@ -8,7 +8,7 @@ from unified_parser import load_chart_from_bytes
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v7_5.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v7_3.pkl')
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
