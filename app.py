@@ -50,8 +50,9 @@ def _dynamic_cap(raw):
     return KNEE + excess ** POWER
 
 
-def compute_boost(feats):
-    """6大类别boost计算，返回总boost、类别分数、原始值和贡献明细"""
+def compute_boost(feats, speed=1.0):
+    """6大类别boost计算，返回总boost、类别分数、原始值和贡献明细
+    speed倍速: 1x exp=0.70, 2x exp=0.85 → boost对速度更敏感"""
     CATEGORIES = {
         '密度': ['density_dimension', 'core_peak_density_1sec_top5avg', 'core_peak_density_top5avg_1beat'],
         '平均位移': ['movement_per_second', 'burst_avg_movement', 'wide_jump_density', 'sim_pos_spread_max'],
@@ -59,6 +60,8 @@ def compute_boost(feats):
         '耐力': ['stamina_ratio', 'tap_per_second', 'total_notes', 'tap_count', 'duration_sec', 'rest_ratio', 'global_jack_count', 'burst_intensity_mean', 'tap_burst_top5'],
         '读谱': ['density_transition_mean', 'density_transition_std', 'tempo_change_count', 'offbeat_ratio', 'rhythm_entropy', 'type_switch_per_sec', 'note_clutter_ratio'],
     }
+    # excess指数: 1x=0.70, 速度↑→指数↑→boost响应更线性
+    excess_exp = 0.70 + 0.15 * (speed - 1.0)
     # 每个类别的主要可读特征（用于显示原始值）
     CAT_RAW_KEY = {
         '密度': ('density_dimension', '(=√(TPS×峰值))'),
@@ -78,10 +81,10 @@ def compute_boost(feats):
         if v <= t:
             continue
         e = v / t - 1.0
-        x = co * (e ** 0.70)
+        x = co * (e ** excess_exp)
         if v > max(P99.get(fname, 0), bl * 0.5):
             pe = v / max(P99.get(fname, 0), bl * 0.5) - 1.0
-            x += co * max(0, pe) ** 0.70 * 0.5
+            x += co * max(0, pe) ** excess_exp * 0.5
         total += x
         contribs.append((fname, round(x, 4), round(v, 2), round(t, 2), round(v/t, 3)))
     boost = _dynamic_cap(total)
@@ -161,7 +164,7 @@ def predict_one_chart(chart_data, speed=1.0):
     if not feats_boost:
         return None, '特征提取失败'
 
-    p_b, dims, key_contribs = compute_boost(feats_boost)
+    p_b, dims, key_contribs = compute_boost(feats_boost, speed=speed)
     p_b_adj = adjust_boost_smooth(p_b, p_gb)
     p_f = p_gb + p_b_adj
 
