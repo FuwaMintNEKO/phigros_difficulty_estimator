@@ -20,7 +20,10 @@ def _parse_bpm_timeline(chart_data):
         for entry in bpm_list:
             st = entry.get('startTime', [0, 0, 1])
             if isinstance(st, (list, tuple)):
-                start_beat = st[0] / max(st[2], 1)
+                if len(st) >= 3:
+                    start_beat = st[0] + (st[1] / max(st[2], 1))
+                else:
+                    start_beat = st[0]
             else:
                 start_beat = float(st) if st else 0.0
             timeline.append((start_beat, entry['bpm']))
