@@ -1340,7 +1340,7 @@ def extract_features(chart_data, speed=1.0):
     dur = features.get('duration_sec', 1.0)
     if len(core_notes_v8) > 1 and dur > 0:
         # ① 同线间隔分析 (BPM归一化, 仅核心note)
-        fast_16th = 0; rhythm_counts = {}
+        fast_16th = 0; fast_32nd = 0; fast_24th = 0; rhythm_counts = {}
         for i, n0 in enumerate(core_notes_v8):
             line0 = n0.get('judge_line_idx', 0)
             t0_sec = time_to_seconds(n0['time'], max(n0.get('bpm', bpm), 1.0), bpm_timeline)
@@ -1361,11 +1361,15 @@ def extract_features(chart_data, speed=1.0):
                         matched = frac; break
                 if matched:
                     if matched >= 4: fast_16th += 1
+                    if matched >= 8: fast_32nd += 1
+                    if matched >= 12: fast_24th += 1
                     if matched >= 2: rhythm_counts[matched] = rhythm_counts.get(matched, 0) + 1
                     break
                 elif beats_val > 0.02:
                     rhythm_counts[0] = rhythm_counts.get(0, 0) + 1; break
         features['fast_note_density_16th'] = fast_16th / max(dur, 0.01)
+        features['fast_note_density_32nd'] = fast_32nd / max(dur, 0.01)
+        features['fast_note_density_24th'] = fast_24th / max(dur, 0.01)
         features['rhythm_type_count'] = len(rhythm_counts)
 
         # ② 多押分析 (10ms bin, 仅核心note)
@@ -1378,6 +1382,8 @@ def extract_features(chart_data, speed=1.0):
         features['avg_chord_size_poly'] = float(np.mean(chords)) if chords else 0.0
     else:
         features['fast_note_density_16th'] = 0.0
+        features['fast_note_density_32nd'] = 0.0
+        features['fast_note_density_24th'] = 0.0
         features['rhythm_type_count'] = 0
         features['avg_chord_size_poly'] = 0.0
 
