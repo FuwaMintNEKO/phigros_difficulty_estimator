@@ -8,7 +8,7 @@ from unified_parser import load_chart_from_bytes
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v8_0.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v8_1.pkl')
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -22,9 +22,9 @@ DC = m.get('dynamic_cap', {'knee': 2.5, 'power': 0.9})
 
 import math
 
-# v8.0: 目标ratio=0.24, 压缩power=0.60, 触发thresh=0.22
+# v8.1: BPM timeline修复, target=0.26, power=0.60, thresh=0.22
 RATIO_THRESHOLD = 0.22
-RATIO_TARGET = 0.24
+RATIO_TARGET = 0.26
 RATIO_POWER = 0.60
 RATIO_STEEPNESS = 25
 

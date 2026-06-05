@@ -1,5 +1,5 @@
 """
-v8.0: 新配置特征 + 精简boost
+v8.1: BPM timeline积分修复 + 新配置特征
 
 新增4个配置特征(替代5个旧弱特征):
   fast_note_density_16th: 同线≤16分音次数/秒 (corr=0.84)
@@ -14,7 +14,6 @@ v8.0: 新配置特征 + 精简boost
 配置维度: 20 → 19特征, 但每个都更强
 """
 import sys, json, os, pickle, numpy as np, math, re
-from collections import Counter
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import GradientBoostingRegressor
@@ -22,87 +21,11 @@ from sklearn.model_selection import StratifiedShuffleSplit, cross_val_score
 from sklearn.metrics import r2_score, mean_absolute_error
 
 sys.path.insert(0, '.')
-from feature_extractor import extract_features, collect_all_notes, time_to_seconds, _parse_bpm_timeline, _compute_duration_sec
+from feature_extractor import extract_features
 from data_loader import load_difficulty_tsv, find_chart_files, load_chart_json
 import io; sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-print('='*70); print('  v8.0 — 新配置特征'); print('='*70)
-
-# ====== 新特征计算 ======
-def compute_new_config_features(chart_data, feats_base):
-    """在基础特征之上计算新配置特征。feats_base需要duration_sec等基础信息"""
-    all_notes, judge_lines, bpm_timeline = collect_all_notes(chart_data)
-    dur = feats_base.get('duration_sec', 1)
-    if not all_notes:
-        return {}
-    
-    n = len(all_notes)
-    result = {}
-    
-    # ① 同线间隔分析 (BPM归一化)
-    fast_16th = 0
-    fast_32nd = 0
-    rhythm_counts = Counter()
-    
-    for i in range(n):
-        n0 = all_notes[i]
-        line0 = n0.get('judge_line_idx', 0)
-        t0_sec = time_to_seconds(n0['time'], max(n0.get('bpm', 120), 1.0))
-        
-        for j in range(i + 1, min(i + 50, n)):
-            nj = all_notes[j]
-            if nj.get('judge_line_idx', 0) != line0:
-                continue
-            tj_sec = time_to_seconds(nj['time'], max(nj.get('bpm', 120), 1.0))
-            gap_sec = tj_sec - t0_sec
-            if gap_sec <= 0.005: continue
-            avg_bpm = (n0.get('bpm', 120) + nj.get('bpm', 120)) / 2
-            beats = gap_sec * avg_bpm / 60.0
-            
-            if beats > 1.5: break
-            
-            # 匹配分音类型
-            matched = None
-            for frac, target in [(2,0.5),(3,1/3),(4,0.25),(5,0.2),(6,1/6),(7,1/7),
-                                  (8,0.125),(9,1/9),(12,1/12),(14,1/14),(16,0.0625),
-                                  (24,1/24),(28,1/28),(32,0.03125)]:
-                if abs(beats - target) / max(target, 0.001) < 0.12:
-                    matched = frac; break
-            
-            if matched:
-                if matched >= 4: fast_16th += 1
-                if matched >= 8: fast_32nd += 1
-                if matched >= 2: rhythm_counts[matched] += 1
-                break
-            elif beats > 0.02:
-                rhythm_counts[0] = rhythm_counts.get(0, 0) + 1  # irregular
-                break
-    
-    result['fast_note_density_16th'] = fast_16th / max(dur, 0.01)
-    result['fast_note_density_32nd'] = fast_32nd / max(dur, 0.01)
-    result['rhythm_type_count'] = len(rhythm_counts)
-    
-    # ② 多押分析
-    time_bins = {}
-    for note in all_notes:
-        t_sec = time_to_seconds(note['time'], max(note.get('bpm', 120), 1.0))
-        t_bin = round(t_sec, 2)
-        time_bins.setdefault(t_bin, []).append(note)
-    
-    chords = [(t, len(g)) for t, g in time_bins.items() if len(g) >= 2]
-    if chords:
-        sizes = [s for _, s in chords]
-        mf_total = sum(s * (s - 1) / 2 for s in sizes)
-        result['mf_weight_per_sec'] = mf_total / max(dur, 0.01)
-        result['avg_chord_size_poly'] = np.mean(sizes)
-        result['max_chord_size_poly'] = max(sizes)
-    else:
-        result['mf_weight_per_sec'] = 0
-        result['avg_chord_size_poly'] = 0
-        result['max_chord_size_poly'] = 1
-    
-    return result
-
+print('='*70); print('  v8.1 — BPM timeline修复 + 新配置特征'); print('='*70)
 
 # ====== 加载v7.3获取P95/P99 ======
 with open('models/6dim_model_v7_3.pkl', 'rb') as f:
@@ -126,17 +49,14 @@ for fn, info in chart_files.items():
         if lv in info['levels'] and lv in diffs:
             all_items.append({'folder':fn,'filepath':info['levels'][lv],'difficulty':diffs[lv],'level':lv})
 
-feats_list, labels, chart_datas = [], [], []
+feats_list, labels = [], []
 for item in all_items:
     try:
         cd = load_chart_json(item['filepath'])
-        feats = extract_features(cd)
+        feats = extract_features(cd)  # v8.0 config features now computed natively
         if feats:
-            new_config = compute_new_config_features(cd, feats)
-            feats.update(new_config)
             feats_list.append(feats)
             labels.append(item['difficulty'])
-            chart_datas.append(cd)
     except: pass
 
 n_all = len(feats_list); labels = np.array(labels)
@@ -307,8 +227,6 @@ for fn in os.listdir(test_dir):
         data, _ = load_chart_from_bytes(raw)
         feats = extract_features(data)
         if feats:
-            new_cfg = compute_new_config_features(data, feats)
-            feats.update(new_cfg)
             chart_data.append((fn, feats, rating))
     except: continue
 print(f'\n测试谱: {len(chart_data)}')
@@ -394,5 +312,5 @@ out = {'gb': gb_f, 'scaler': sc_f, 'feature_names': FN_NEW,
        'p95_vals': P95, 'p99_vals': P99, 'FLAT_FEATURES': FLAT_F, 'dynamic_cap': DC}
 if best_sig: out['sigmoid_params'] = {'target': best_sig[0], 'power': best_sig[1], 'thresh': best_sig[2]}
 os.makedirs('models', exist_ok=True)
-with open('models/6dim_model_v8_0.pkl', 'wb') as f: pickle.dump(out, f)
-print(f'\n已保存: models/6dim_model_v8_0.pkl\n{"="*70}')
+with open('models/6dim_model_v8_1.pkl', 'wb') as f: pickle.dump(out, f)
+print(f'\n已保存: models/6dim_model_v8_1.pkl\n{"="*70}')

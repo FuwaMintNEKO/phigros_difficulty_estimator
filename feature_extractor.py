@@ -106,8 +106,18 @@ def collect_all_notes(chart_data):
     return all_notes, judge_lines, bpm_timeline
 
 
-def time_to_seconds(time, bpm):
-    return (time / bpm) * 1.875
+def time_to_seconds(time_ticks, bpm, bpm_timeline=None):
+    """tick → 秒。提供bpm_timeline时积分计算(变速谱正确), 否则用恒定BPM估算"""
+    if bpm_timeline is None or len(bpm_timeline) <= 1:
+        return (time_ticks / bpm) * 1.875  # ticks * 60 / (bpm * 32)
+    # 积分: 从beat=0到time_ticks/32, 逐段累加时间
+    target_beat = time_ticks / 32.0
+    total_sec = 0.0
+    for i, (seg_start, seg_bpm) in enumerate(bpm_timeline):
+        seg_end = bpm_timeline[i+1][0] if i+1 < len(bpm_timeline) else target_beat
+        seg_beats = max(0, min(seg_end, target_beat) - max(seg_start, 0))
+        total_sec += seg_beats / seg_bpm * 60
+    return total_sec
 
 
 def collect_speed_events(judge_lines):
@@ -190,7 +200,7 @@ def extract_features(chart_data, speed=1.0):
     # ====== 真实密度（排除 >1s 间隙，反映击打时真实密度水平） ======
     # 倍速时阈值等比缩放：2x速下0.5秒的间隙就相当于原速1秒
     rest_gap_threshold = 1.0 / speed
-    all_t_sec = np.array([time_to_seconds(t, max(n.get('bpm', bpm), 1.0)) for t, n in zip(times, all_notes)])
+    all_t_sec = np.array([time_to_seconds(t, max(n.get('bpm', bpm), 1.0), bpm_timeline) for t, n in zip(times, all_notes)])
     all_t_sec.sort()
     if n_notes > 1:
         gaps = np.diff(all_t_sec)
@@ -584,7 +594,7 @@ def extract_features(chart_data, speed=1.0):
     features['has_AT'] = 1 if n_flick > 0 else 0
 
     if n_notes > 4:
-        times_sec = np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(times, note_bpms)])
+        times_sec = np.array([time_to_seconds(t, max(b, 1.0), bpm_timeline) for t, b in zip(times, note_bpms)])
         gaps_sec = np.diff(times_sec)
         features['max_gap_sec'] = float(np.max(gaps_sec))
 
@@ -633,7 +643,7 @@ def extract_features(chart_data, speed=1.0):
     tps_t = times[tps_mask]
     if len(tps_t) > 5:
         tps_bpm_arr = np.array([n.get('bpm', bpm) for n in all_notes])[tps_mask]
-        tps_t_sec = np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(tps_t, tps_bpm_arr)])
+        tps_t_sec = np.array([time_to_seconds(t, max(b, 1.0), bpm_timeline) for t, b in zip(tps_t, tps_bpm_arr)])
         tps_t_sec.sort()
         for win_name, win_sec in [('tps_1sec', 1.0), ('tps_05sec', 0.5)]:
             left = 0
@@ -659,7 +669,7 @@ def extract_features(chart_data, speed=1.0):
             features[f'peak_{win_name}_top5avg'] = 0.0
 
     # ====== 1秒窗口全音符密度峰值（1smax密度） ======
-    all_t_sec = np.array([time_to_seconds(t, max(n.get('bpm', bpm), 1.0)) for t, n in zip(times, all_notes)])
+    all_t_sec = np.array([time_to_seconds(t, max(n.get('bpm', bpm), 1.0), bpm_timeline) for t, n in zip(times, all_notes)])
     all_t_sec.sort()
     if len(all_t_sec) > 5:
         left = 0; max_cnt = 0; all_counts = []
@@ -679,7 +689,7 @@ def extract_features(chart_data, speed=1.0):
     core_mask_1s = tap_mask | hold_mask
     core_notes_times = times[core_mask_1s]
     if len(core_notes_times) > 5:
-        core_t_sec_1s = np.array([time_to_seconds(t, max(all_notes[i].get('bpm', bpm), 1.0))
+        core_t_sec_1s = np.array([time_to_seconds(t, max(all_notes[i].get('bpm', bpm), 1.0), bpm_timeline)
                                    for i, t in enumerate(core_notes_times)])
         core_t_sec_1s.sort()
         left = 0; max_cnt = 0; all_counts = []
@@ -706,10 +716,9 @@ def extract_features(chart_data, speed=1.0):
     core_t = times[stamina_mask]
     if len(core_t) > 10:
         core_bpm_arr = np.array([n.get('bpm', bpm) for n in all_notes])[stamina_mask]
-        core_t_sec = np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(core_t, core_bpm_arr)])
+        core_t_sec = np.array([time_to_seconds(t, max(b, 1.0), bpm_timeline) for t, b in zip(core_t, core_bpm_arr)])
         core_t_sec.sort()
-        avg_core_tps = len(core_t_sec) / max(time_to_seconds(core_t_sec[-1] if len(core_t_sec) > 0 else 1, max(bpm, 1.0)), 0.01)
-        # Use average from chart duration
+        # stamina ratio uses total duration (ds) for avg TPS, per original code
         avg_core_tps = len(core_t_sec) / max(ds, 0.01)
         threshold = avg_core_tps * 0.9
         # Sliding window count > threshold
@@ -779,7 +788,7 @@ def extract_features(chart_data, speed=1.0):
         duration_sec = features['duration_sec']  # 已用BPM时间线正确计算
         
         # Step 1: 按时间分组（5ms内=同一和弦事件），取中位数位置
-        times_sec_arr = np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(times, note_bpms)])
+        times_sec_arr = np.array([time_to_seconds(t, max(b, 1.0), bpm_timeline) for t, b in zip(times, note_bpms)])
         events = []  # [(time_sec, median_pos, chord_size)]
         i = 0
         while i < n_notes:
@@ -1150,7 +1159,7 @@ def extract_features(chart_data, speed=1.0):
         seg_labels = []
         step_sec = 0.25  # 滑动步长
         cur_sec = 0.0
-        ts_sec = times_sec.copy() if 'times_sec' in dir() else np.array([time_to_seconds(t, max(b, 1.0)) for t, b in zip(times, note_bpms)])
+        ts_sec = times_sec.copy() if 'times_sec' in dir() else np.array([time_to_seconds(t, max(b, 1.0), bpm_timeline) for t, b in zip(times, note_bpms)])
         t_end_sec = float(ts_sec[-1])
         while cur_sec + window_sec <= t_end_sec:
             win_end_sec = cur_sec + window_sec
@@ -1315,11 +1324,11 @@ def extract_features(chart_data, speed=1.0):
         for i in range(n_notes_total):
             n0 = all_notes[i]
             line0 = n0.get('judge_line_idx', 0)
-            t0_sec = time_to_seconds(n0['time'], max(n0.get('bpm', bpm), 1.0))
+            t0_sec = time_to_seconds(n0['time'], max(n0.get('bpm', bpm), 1.0), bpm_timeline)
             for j in range(i + 1, min(i + 50, n_notes_total)):
                 nj = all_notes[j]
                 if nj.get('judge_line_idx', 0) != line0: continue
-                tj_sec = time_to_seconds(nj['time'], max(nj.get('bpm', bpm), 1.0))
+                tj_sec = time_to_seconds(nj['time'], max(nj.get('bpm', bpm), 1.0), bpm_timeline)
                 gap_sec = tj_sec - t0_sec
                 if gap_sec <= 0.005: continue
                 avg_bpm_val = (n0.get('bpm', bpm) + nj.get('bpm', bpm)) / 2
@@ -1343,7 +1352,7 @@ def extract_features(chart_data, speed=1.0):
         # ② 多押分析 (10ms bin)
         time_bins = {}
         for note in all_notes:
-            t_sec = time_to_seconds(note['time'], max(note.get('bpm', bpm), 1.0))
+            t_sec = time_to_seconds(note['time'], max(note.get('bpm', bpm), 1.0), bpm_timeline)
             t_bin = round(t_sec, 2)
             time_bins.setdefault(t_bin, []).append(note)
         chords = [len(g) for g in time_bins.values() if len(g) >= 2]
