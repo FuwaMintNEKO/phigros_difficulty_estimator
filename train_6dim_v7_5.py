@@ -28,9 +28,12 @@ FLAT_ORIG = v73m['FLAT_FEATURES']
 feat_boost_names = [f[0] for f in FLAT_ORIG]; n_boost = len(feat_boost_names)
 DC = {'knee': 1.0, 'power': 0.90}
 
-SPEED_CURVE = {0.5:-3.5, 0.6:-2.5, 0.7:-1.8, 0.8:-1.0, 0.85:-0.5, 0.9:-0.2,
-               1.0:0.0, 1.1:0.3, 1.15:0.6, 1.2:1.0, 1.3:1.5, 1.4:2.0,
-               1.5:2.5, 1.6:3.0, 1.7:3.5, 1.8:4.0, 2.0:5.0}
+def speed_offset(s):
+    """倍速→定数偏移: clamp((s-1)*5, ±2.5)"""
+    return max(-2.5, min(2.5, (s - 1.0) * 5.0))
+
+SPEED_CURVE = {s: round(speed_offset(s), 2) for s in [0.5, 0.6, 0.7, 0.8, 0.85, 0.9,
+               1.0, 1.1, 1.15, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 2.0]}
 SPEEDS = [0.5, 0.7, 0.85, 1.0, 1.15, 1.3, 1.5, 2.0]
 
 def apply_speed(data, s):
@@ -187,8 +190,10 @@ for name, fp in [('怪文書', r'C:\Users\NaNK\Downloads\ギザバ怪文書(18.3
     p2x_slider = quick_predict(apply_speed(base, 2.0))
     
     dm = copy.deepcopy(base)
-    for jl in dm['judgeLineList']:
+    for jl in dm.get('judgeLineList', []):
         if 'bpm' in jl: jl['bpm'] = jl['bpm'] * 2.0
+    for e in dm.get('BPMList', []):
+        if 'bpm' in e: e['bpm'] = e['bpm'] * 2.0
     p2x_manual = quick_predict(dm)
     
     spread = p2x_slider - p1x

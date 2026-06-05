@@ -141,10 +141,12 @@ def apply_speed_multiplier(chart_data, speed):
 
 
 # ====== 单谱预测 ======
+def speed_offset(speed):
+    """倍速定数偏移: clamp((s-1)*5, -2.5, +2.5)"""
+    return max(-2.5, min(2.5, (speed - 1.0) * 5.0))
+
 def predict_one_chart(chart_data, speed=1.0):
-    """预测：滑块通过apply_speed缩放BPM后，与手动改BPM文件完全等价"""
-    if speed != 1.0:
-        chart_data = apply_speed_multiplier(chart_data, speed)
+    """预测：始终在1x提取特征，预测基础定数，再加倍速偏移"""
     feats = extract_features(chart_data)
     if not feats:
         return None, '特征提取失败'
@@ -154,7 +156,8 @@ def predict_one_chart(chart_data, speed=1.0):
     p_gb = float(gb.predict(xs)[0])
     p_b, dims, key_contribs = compute_boost(feats)
     p_b_adj = adjust_boost_smooth(p_b, p_gb)
-    p_f = p_gb + p_b_adj
+    offset = speed_offset(speed) if speed != 1.0 else 0.0
+    p_f = p_gb + p_b_adj + offset
 
     meta = {}
     if 'META' in chart_data:
@@ -181,6 +184,7 @@ def predict_one_chart(chart_data, speed=1.0):
         'boost': round(p_b, 4),
         'boost_adj': round(p_b_adj, 4),
         'boost_ratio': round(p_b / p_gb, 4) if p_gb > 0 else 0,
+        'speed_offset': round(offset, 2),
         'categories': dims.get('categories', {}),
         'cat_raws': dims.get('cat_raws', {}),
         'prediction': round(p_f, 4),

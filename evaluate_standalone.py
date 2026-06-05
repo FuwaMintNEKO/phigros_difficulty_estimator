@@ -5,7 +5,7 @@ from feature_extractor import extract_features
 from unified_parser import load_chart
 
 # ====== 从 app.py 导入最新的 boost 逻辑 ======
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_3.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '5dim_model_v5_4.pkl')
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
 gb = m['gb']; scaler = m['scaler']
