@@ -212,6 +212,7 @@ def predict_one_chart(chart_data, speed=1.0):
         'rest_duration_sec': round(feats_display.get('duration_sec', 0) - feats_display.get('real_active_sec', 0), 1),
         'rest_ratio': round((feats_display.get('duration_sec', 0) - feats_display.get('real_active_sec', 0)) / max(feats_display.get('duration_sec', 0), 0.01), 3),
         'real_active_sec': round(feats_display.get('real_active_sec', 0), 1),
+        'above_avg_density_1sec_top5': round(feats_display.get('above_avg_density_1sec_top5', 0), 1),
         'jack_count': feats_display.get('global_jack_count', 0),
         'key_features': [
             {

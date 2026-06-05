@@ -328,6 +328,7 @@ function renderResults(results) {
                     <div class="chart-info-item"><div class="label">时长 / 有效时长</div><div class="value">${r.duration_sec}s / ${r.real_active_sec}s</div></div>
                     <div class="chart-info-item"><div class="label">BPM</div><div class="value">${r.bpm_change_count > 0 ? Math.round(r.bpm_min) + '~' + Math.round(r.bpm_max) + ' (' + r.bpm_change_count + '变)' : Math.round(r.bpm)}</div></div>
                     <div class="chart-info-item"><div class="label">真实TPS (全时段)</div><div class="value">${r.real_core_notes_per_second} (${r.core_notes_per_second})</div></div>
+                    <div class="chart-info-item"><div class="label">高潮段TPS (≥均值)</div><div class="value">${r.above_avg_density_1sec_top5}</div></div>
                     <div class="chart-info-item"><div class="label">真实NPS (全时段)</div><div class="value">${r.real_notes_per_second} (${r.notes_per_second})</div></div>
                     <div class="chart-info-item"><div class="label">休息段 (>1s)</div><div class="value">${r.rest_duration_sec}s / ${(r.rest_ratio*100).toFixed(1)}%</div></div>
                 </div>
