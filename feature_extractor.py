@@ -708,28 +708,27 @@ def extract_features(chart_data, speed=1.0):
         features['core_peak_density_1sec'] = 0
         features['core_peak_density_1sec_top5avg'] = 0.0
 
-    # ====== 密度维度（保留旧公式，above_avg 在前端独立展示） ======
+    # ====== 密度维度：√(真实TPS × 高潮段平均TPS) ======
+    # 高潮段 = 所有1s窗口密度 ≥ 全谱均值的窗口，取这些窗口的平均TPS
     rcnps = features.get('real_core_notes_per_second', 0)
-    cp1s = features.get('core_peak_density_1sec_top5avg', 0)
-    features['density_dimension'] = float(np.sqrt(max(rcnps, 0.01) * max(cp1s, 0.01)))
-
-    # ====== 高于均值的1s峰值TPS（前端展示用，反映高潮段密度） ======
-    above_avg_density = cp1s  # fallback
-    if len(core_t_sec_1s_all := np.array([time_to_seconds(t, max(all_notes[i].get('bpm', bpm), 1.0), bpm_timeline)
-                                           for i, t in enumerate(core_times)])) > 5:
-        t_arr = np.sort(core_t_sec_1s_all)
-        left = 0; above_counts = []
+    above_avg_mean = rcnps  # fallback
+    above_avg_ratio = 0.0
+    if len(core_times) > 5:
+        t_arr = np.sort(np.array([time_to_seconds(t, max(all_notes[i].get('bpm', bpm), 1.0), bpm_timeline)
+                                   for i, t in enumerate(core_times)]))
+        left = 0; above_windows = []
         for right in range(len(t_arr)):
             while t_arr[right] - t_arr[left] > 1.0:
                 left += 1
-            cnt = right - left + 1
-            if cnt >= rcnps:
-                above_counts.append(cnt)
-        if above_counts:
-            above_counts.sort(reverse=True)
-            top5 = above_counts[:max(5, len(above_counts)//20)]
-            above_avg_density = float(np.mean(top5))
-    features['above_avg_density_1sec_top5'] = above_avg_density
+            window_tps = right - left + 1
+            if window_tps >= rcnps:
+                above_windows.append(window_tps)
+        if above_windows:
+            above_avg_mean = float(np.mean(above_windows))
+            above_avg_ratio = len(above_windows) / max(len(t_arr), 1)
+    features['above_avg_density_mean'] = above_avg_mean
+    features['above_avg_density_ratio'] = above_avg_ratio
+    features['density_dimension'] = float(np.sqrt(max(rcnps, 0.01) * max(above_avg_mean, 0.01)))
 
     # ====== 耐力指标：1秒窗口tps>平均*0.9 的秒数占比 ======
     stamina_mask = tap_mask | hold_mask  # 蓝键+长条 = core notes

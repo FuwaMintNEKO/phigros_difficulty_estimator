@@ -8,7 +8,7 @@ from unified_parser import load_chart_from_bytes
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v8_2.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v8_3.pkl')
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -212,7 +212,8 @@ def predict_one_chart(chart_data, speed=1.0):
         'rest_duration_sec': round(feats_display.get('duration_sec', 0) - feats_display.get('real_active_sec', 0), 1),
         'rest_ratio': round((feats_display.get('duration_sec', 0) - feats_display.get('real_active_sec', 0)) / max(feats_display.get('duration_sec', 0), 0.01), 3),
         'real_active_sec': round(feats_display.get('real_active_sec', 0), 1),
-        'above_avg_density_1sec_top5': round(feats_display.get('above_avg_density_1sec_top5', 0), 1),
+        'above_avg_density_mean': round(feats_display.get('above_avg_density_mean', 0), 1),
+        'above_avg_density_ratio': round(feats_display.get('above_avg_density_ratio', 0), 3),
         'jack_count': feats_display.get('global_jack_count', 0),
         'key_features': [
             {
