@@ -209,8 +209,8 @@ def predict_one_chart(chart_data, speed=1.0):
         'core_notes_per_second': round(feats_display.get('core_notes_per_second', 0), 2),
         'real_core_notes_per_second': round(feats_display.get('real_core_notes_per_second', 0), 2),
         'tap_per_second': round(feats_display.get('tap_per_second', 0), 2),
-        'rest_duration_sec': round(feats_display.get('rest_duration_sec', 0), 1),
-        'rest_ratio': round(feats_display.get('rest_ratio', 0), 3),
+        'rest_duration_sec': round(feats_display.get('duration_sec', 0) - feats_display.get('real_active_sec', 0), 1),
+        'rest_ratio': round((feats_display.get('duration_sec', 0) - feats_display.get('real_active_sec', 0)) / max(feats_display.get('duration_sec', 0), 0.01), 3),
         'real_active_sec': round(feats_display.get('real_active_sec', 0), 1),
         'jack_count': feats_display.get('global_jack_count', 0),
         'key_features': [
