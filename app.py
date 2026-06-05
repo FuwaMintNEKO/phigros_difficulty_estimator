@@ -63,7 +63,7 @@ def compute_boost(feats, speed=1.0):
     excess_exp = 0.70 + 0.15 * (speed - 1.0)
     # 每个类别的主要可读特征（用于显示原始值）
     CAT_RAW_KEY = {
-        '密度': ('density_dimension', '(=√(TPS×峰值))'),
+        '密度': ('density_dimension', '(=√(TPS×高潮段均值))'),
         '平均位移': ('movement_per_second', '格/秒'),
         '配置': ('pattern_switch_rate', '切换/秒'),
         '耐力': ('tap_per_second', '键/秒'),
