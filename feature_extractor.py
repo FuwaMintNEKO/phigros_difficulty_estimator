@@ -1318,18 +1318,18 @@ def extract_features(chart_data, speed=1.0):
         features['position_entropy'] = 0.0
         features['position_range_used'] = 0.0
 
-    # ====== v8.0 新配置特征：快音符密度 + 和弦size + 节奏种类 ======
-    n_notes_total = len(all_notes)
+    # ====== v8.0 新配置特征：快音符密度 + 和弦size + 节奏种类（仅核心note: tap+hold）======
+    core_mask_v8 = (types == NOTE_TAP) | (types == NOTE_HOLD)
+    core_notes_v8 = [all_notes[i] for i in range(n_notes) if core_mask_v8[i]]
     dur = features.get('duration_sec', 1.0)
-    if n_notes_total > 1 and dur > 0:
-        # ① 同线间隔分析 (BPM归一化)
+    if len(core_notes_v8) > 1 and dur > 0:
+        # ① 同线间隔分析 (BPM归一化, 仅核心note)
         fast_16th = 0; rhythm_counts = {}
-        for i in range(n_notes_total):
-            n0 = all_notes[i]
+        for i, n0 in enumerate(core_notes_v8):
             line0 = n0.get('judge_line_idx', 0)
             t0_sec = time_to_seconds(n0['time'], max(n0.get('bpm', bpm), 1.0), bpm_timeline)
-            for j in range(i + 1, min(i + 50, n_notes_total)):
-                nj = all_notes[j]
+            for j in range(i + 1, min(i + 50, len(core_notes_v8))):
+                nj = core_notes_v8[j]
                 if nj.get('judge_line_idx', 0) != line0: continue
                 tj_sec = time_to_seconds(nj['time'], max(nj.get('bpm', bpm), 1.0), bpm_timeline)
                 gap_sec = tj_sec - t0_sec
@@ -1352,9 +1352,9 @@ def extract_features(chart_data, speed=1.0):
         features['fast_note_density_16th'] = fast_16th / max(dur, 0.01)
         features['rhythm_type_count'] = len(rhythm_counts)
 
-        # ② 多押分析 (10ms bin)
+        # ② 多押分析 (10ms bin, 仅核心note)
         time_bins = {}
-        for note in all_notes:
+        for note in core_notes_v8:
             t_sec = time_to_seconds(note['time'], max(note.get('bpm', bpm), 1.0), bpm_timeline)
             t_bin = round(t_sec, 2)
             time_bins.setdefault(t_bin, []).append(note)

@@ -8,7 +8,7 @@ from unified_parser import load_chart_from_bytes
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v8_1.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v8_2.pkl')
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -22,10 +22,10 @@ DC = m.get('dynamic_cap', {'knee': 2.5, 'power': 0.9})
 
 import math
 
-# v8.1: BPM timeline修复, target=0.26, power=0.60, thresh=0.22
+# v8.2: 移除峰值密度boost, target=0.28, power=0.75, thresh=0.22
 RATIO_THRESHOLD = 0.22
-RATIO_TARGET = 0.26
-RATIO_POWER = 0.60
+RATIO_TARGET = 0.28
+RATIO_POWER = 0.75
 RATIO_STEEPNESS = 25
 
 def adjust_boost_smooth(boost, gb):
@@ -53,7 +53,7 @@ def compute_boost(feats, speed=1.0):
     """6大类别boost计算。excess指数随speed线性增加(1x=0.70, 2x=0.85)"""
     excess_exp = 0.70 + 0.15 * (speed - 1.0)
     CATEGORIES = {
-        '密度': ['density_dimension', 'core_peak_density_1sec_top5avg', 'core_peak_density_top5avg_1beat'],
+        '密度': ['density_dimension', 'fast_note_density_16th', 'real_core_notes_per_second'],
         '平均位移': ['movement_per_second', 'burst_avg_movement', 'wide_jump_density', 'sim_pos_spread_max'],
         '配置': ['stair_density', 'stair_speed_avg', 'stair_complexity', 'stair_chord_ratio', 'trill_density', 'jack_density', 'chord_size_entropy', 'sim_pos_spread_mean', 'multi_finger_3plus_events', 'weighted_mf_score_per_sec', 'discrete_mf_ratio', 'chord_alternation_rate', 'position_cluster_count', 'track_deviation_score', 'position_entropy', 'position_range_used', 'pattern_switch_rate', 'direction_irregularity', 'hold_interference_index', 'drag_flick_ratio'],
         '耐力': ['stamina_ratio', 'tap_per_second', 'total_notes', 'tap_count', 'duration_sec', 'rest_ratio', 'global_jack_count', 'burst_intensity_mean', 'tap_burst_top5'],
