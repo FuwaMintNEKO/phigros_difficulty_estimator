@@ -8,7 +8,7 @@ from unified_parser import load_chart_from_bytes
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v7_3.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v8_0.pkl')
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -22,12 +22,11 @@ DC = m.get('dynamic_cap', {'knee': 2.5, 'power': 0.9})
 
 import math
 
-# 平滑条件性boost调整：只在boost/GB比值异常时压缩
-# v7.3: 目标ratio=0.24, 压缩power=0.70, 触发thresh=0.24 (IN/AT Ridge+迭代优化)
-RATIO_THRESHOLD = 0.24    # 超过此值开始触发调整
-RATIO_TARGET = 0.24       # 调整目标比值
-RATIO_POWER = 0.70        # <1 → 凸性压缩
-RATIO_STEEPNESS = 25      # sigmoid 过渡陡度
+# v8.0: 目标ratio=0.24, 压缩power=0.60, 触发thresh=0.22
+RATIO_THRESHOLD = 0.22
+RATIO_TARGET = 0.24
+RATIO_POWER = 0.60
+RATIO_STEEPNESS = 25
 
 def adjust_boost_smooth(boost, gb):
     """Sigmoid平滑条件性调整：ratio<th不动，ratio>th逐渐施加凸性压缩。boost<2不压缩（简单谱需要boost补偿低GB）"""
@@ -50,8 +49,9 @@ def _dynamic_cap(raw):
     return KNEE + excess ** POWER
 
 
-def compute_boost(feats):
-    """6大类别boost计算"""
+def compute_boost(feats, speed=1.0):
+    """6大类别boost计算。excess指数随speed线性增加(1x=0.70, 2x=0.85)"""
+    excess_exp = 0.70 + 0.15 * (speed - 1.0)
     CATEGORIES = {
         '密度': ['density_dimension', 'core_peak_density_1sec_top5avg', 'core_peak_density_top5avg_1beat'],
         '平均位移': ['movement_per_second', 'burst_avg_movement', 'wide_jump_density', 'sim_pos_spread_max'],
@@ -59,6 +59,8 @@ def compute_boost(feats):
         '耐力': ['stamina_ratio', 'tap_per_second', 'total_notes', 'tap_count', 'duration_sec', 'rest_ratio', 'global_jack_count', 'burst_intensity_mean', 'tap_burst_top5'],
         '读谱': ['density_transition_mean', 'density_transition_std', 'tempo_change_count', 'offbeat_ratio', 'rhythm_entropy', 'type_switch_per_sec', 'note_clutter_ratio'],
     }
+    # excess指数: 1x=0.70, 速度↑→指数↑→boost响应更线性
+    excess_exp = 0.70 + 0.15 * (speed - 1.0)
     # 每个类别的主要可读特征（用于显示原始值）
     CAT_RAW_KEY = {
         '密度': ('density_dimension', '(=√(TPS×峰值))'),
@@ -78,10 +80,10 @@ def compute_boost(feats):
         if v <= t:
             continue
         e = v / t - 1.0
-        x = co * (e ** 0.70)
+        x = co * (e ** excess_exp)
         if v > max(P99.get(fname, 0), bl * 0.5):
             pe = v / max(P99.get(fname, 0), bl * 0.5) - 1.0
-            x += co * max(0, pe) ** 0.70 * 0.5
+            x += co * max(0, pe) ** excess_exp * 0.5
         total += x
         contribs.append((fname, round(x, 4), round(v, 2), round(t, 2), round(v/t, 3)))
     boost = _dynamic_cap(total)
@@ -141,23 +143,32 @@ def apply_speed_multiplier(chart_data, speed):
 
 
 # ====== 单谱预测 ======
-def speed_offset(speed):
-    """倍速定数偏移: clamp((s-1)*5, -2.5, +2.5)"""
-    return max(-2.5, min(2.5, (speed - 1.0) * 5.0))
-
 def predict_one_chart(chart_data, speed=1.0):
-    """预测：始终在1x提取特征，预测基础定数，再加倍速偏移"""
-    feats = extract_features(chart_data)
-    if not feats:
+    """变速预测：GB始终用1x特征，boost用变速特征"""
+    # GB: 始终用 1x 特征（GB只在训练分布内有效）
+    feats_1x = extract_features(chart_data, speed=1.0)
+    if not feats_1x:
         return None, '特征提取失败'
-
-    x = np.array([[feats.get(n, 0) for n in FN]])
+    x = np.array([[feats_1x.get(n, 0) for n in FN]])
     xs = scaler.transform(x)
     p_gb = float(gb.predict(xs)[0])
-    p_b, dims, key_contribs = compute_boost(feats)
+
+    # Boost: 变速特征
+    if speed != 1.0:
+        chart_data_scaled = apply_speed_multiplier(chart_data, speed)
+        feats_boost = extract_features(chart_data_scaled, speed=speed)
+    else:
+        feats_boost = extract_features(chart_data, speed=1.0)
+
+    if not feats_boost:
+        return None, '特征提取失败'
+
+    p_b, dims, key_contribs = compute_boost(feats_boost, speed=speed)
     p_b_adj = adjust_boost_smooth(p_b, p_gb)
-    offset = speed_offset(speed) if speed != 1.0 else 0.0
-    p_f = p_gb + p_b_adj + offset
+    p_f = p_gb + p_b_adj
+
+    # 显示用的特征值：用变速的（前端看实时数据）
+    feats_display = feats_boost if speed != 1.0 else feats_1x
 
     meta = {}
     if 'META' in chart_data:
@@ -184,25 +195,24 @@ def predict_one_chart(chart_data, speed=1.0):
         'boost': round(p_b, 4),
         'boost_adj': round(p_b_adj, 4),
         'boost_ratio': round(p_b / p_gb, 4) if p_gb > 0 else 0,
-        'speed_offset': round(offset, 2),
         'categories': dims.get('categories', {}),
         'cat_raws': dims.get('cat_raws', {}),
         'prediction': round(p_f, 4),
-        'total_notes': feats.get('total_notes', 0),
-        'duration_sec': round(feats.get('duration_sec', 0), 1),
-        'bpm': feats.get('bpm', 0),
-        'bpm_min': feats.get('bpm_min', 0),
-        'bpm_max': feats.get('bpm_max', 0),
-        'bpm_change_count': feats.get('bpm_change_count', 0),
-        'notes_per_second': round(feats.get('notes_per_second', 0), 2),
-        'real_notes_per_second': round(feats.get('real_notes_per_second', 0), 2),
-        'core_notes_per_second': round(feats.get('core_notes_per_second', 0), 2),
-        'real_core_notes_per_second': round(feats.get('real_core_notes_per_second', 0), 2),
-        'tap_per_second': round(feats.get('tap_per_second', 0), 2),
-        'rest_duration_sec': round(feats.get('rest_duration_sec', 0), 1),
-        'rest_ratio': round(feats.get('rest_ratio', 0), 3),
-        'real_active_sec': round(feats.get('real_active_sec', 0), 1),
-        'jack_count': feats.get('global_jack_count', 0),
+        'total_notes': feats_display.get('total_notes', 0),
+        'duration_sec': round(feats_display.get('duration_sec', 0), 1),
+        'bpm': feats_display.get('bpm', 0),
+        'bpm_min': feats_display.get('bpm_min', 0),
+        'bpm_max': feats_display.get('bpm_max', 0),
+        'bpm_change_count': feats_display.get('bpm_change_count', 0),
+        'notes_per_second': round(feats_display.get('notes_per_second', 0), 2),
+        'real_notes_per_second': round(feats_display.get('real_notes_per_second', 0), 2),
+        'core_notes_per_second': round(feats_display.get('core_notes_per_second', 0), 2),
+        'real_core_notes_per_second': round(feats_display.get('real_core_notes_per_second', 0), 2),
+        'tap_per_second': round(feats_display.get('tap_per_second', 0), 2),
+        'rest_duration_sec': round(feats_display.get('rest_duration_sec', 0), 1),
+        'rest_ratio': round(feats_display.get('rest_ratio', 0), 3),
+        'real_active_sec': round(feats_display.get('real_active_sec', 0), 1),
+        'jack_count': feats_display.get('global_jack_count', 0),
         'key_features': [
             {
                 'name': fname,

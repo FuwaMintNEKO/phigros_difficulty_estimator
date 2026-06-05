@@ -123,7 +123,8 @@ def collect_speed_events(judge_lines):
     return all_events
 
 
-def extract_features(chart_data):
+def extract_features(chart_data, speed=1.0):
+    """speed: 倍速缩放因子，用于调整所有秒级阈值（1/speed倍）"""
     all_notes, judge_lines, bpm_timeline = collect_all_notes(chart_data)
     if not all_notes:
         return None
@@ -186,30 +187,24 @@ def extract_features(chart_data):
     features['core_notes_per_second'] = core_n / ds
     features['core_notes_per_beat'] = core_n / max(dt, 0.01)
 
-    # ====== 真实密度（排除 >=2拍 间隙，BPM无关的休息段定义） ======
-    REST_TICK_THRESHOLD = 64  # 2拍 = 64ticks(1tick=1/32拍)，BPM无关
+    # ====== 真实密度（排除 >1s 间隙，反映击打时真实密度水平） ======
+    # 倍速时阈值等比缩放：2x速下0.5秒的间隙就相当于原速1秒
+    rest_gap_threshold = 1.0 / speed
     all_t_sec = np.array([time_to_seconds(t, max(n.get('bpm', bpm), 1.0)) for t, n in zip(times, all_notes)])
+    all_t_sec.sort()
     if n_notes > 1:
-        # 按tick排序后计算拍间隔，识别>=2拍的休息段
-        sort_idx = np.argsort(times)
-        sorted_times = times[sort_idx]
-        tick_gaps = np.diff(sorted_times)
-        rest_mask = tick_gaps >= REST_TICK_THRESHOLD
-        # 将休息段的拍数转回秒数（用对应的BPM）
-        rest_ticks = float(np.sum(tick_gaps[rest_mask]))
-        rest_beats = rest_ticks / 32.0
-        # 平均BPM近似：用第一条线的bpm
-        rest_duration = rest_beats / bpm * 60.0
-        real_active_ticks = float(sorted_times[-1] - sorted_times[0] - rest_ticks)
-        real_active = real_active_ticks / 32.0 / bpm * 60.0
+        gaps = np.diff(all_t_sec)
+        big_gaps = gaps[gaps > rest_gap_threshold]
+        rest_duration = float(np.sum(big_gaps))
+        real_active = max(all_t_sec[-1] - all_t_sec[0] - rest_duration, 0.01)
     else:
         rest_duration = 0.0
         real_active = max(ds, 0.01)
     features['real_active_sec'] = float(real_active)
     features['rest_duration_sec'] = float(rest_duration)
     features['rest_ratio'] = float(rest_duration / max(ds, 0.01))
-    features['real_core_notes_per_second'] = core_n / max(real_active, 0.01)  # 真实核心TPS
-    features['real_notes_per_second'] = n_notes / max(real_active, 0.01)  # 真实NPS
+    features['real_core_notes_per_second'] = core_n / real_active  # 真实核心TPS
+    features['real_notes_per_second'] = n_notes / real_active  # 真实NPS
 
     # ====== 窗口密度（缓存避免重复计算） ======
     _density_cache = {}
@@ -1310,6 +1305,53 @@ def extract_features(chart_data):
     else:
         features['position_entropy'] = 0.0
         features['position_range_used'] = 0.0
+
+    # ====== v8.0 新配置特征：快音符密度 + 和弦size + 节奏种类 ======
+    n_notes_total = len(all_notes)
+    dur = features.get('duration_sec', 1.0)
+    if n_notes_total > 1 and dur > 0:
+        # ① 同线间隔分析 (BPM归一化)
+        fast_16th = 0; rhythm_counts = {}
+        for i in range(n_notes_total):
+            n0 = all_notes[i]
+            line0 = n0.get('judge_line_idx', 0)
+            t0_sec = time_to_seconds(n0['time'], max(n0.get('bpm', bpm), 1.0))
+            for j in range(i + 1, min(i + 50, n_notes_total)):
+                nj = all_notes[j]
+                if nj.get('judge_line_idx', 0) != line0: continue
+                tj_sec = time_to_seconds(nj['time'], max(nj.get('bpm', bpm), 1.0))
+                gap_sec = tj_sec - t0_sec
+                if gap_sec <= 0.005: continue
+                avg_bpm_val = (n0.get('bpm', bpm) + nj.get('bpm', bpm)) / 2
+                beats_val = gap_sec * avg_bpm_val / 60.0
+                if beats_val > 1.5: break
+                matched = None
+                for frac, target in [(2,0.5),(3,1/3),(4,0.25),(5,0.2),(6,1/6),(7,1/7),
+                                      (8,0.125),(9,1/9),(12,1/12),(14,1/14),(16,0.0625),
+                                      (24,1/24),(28,1/28),(32,0.03125)]:
+                    if abs(beats_val - target) / max(target, 0.001) < 0.12:
+                        matched = frac; break
+                if matched:
+                    if matched >= 4: fast_16th += 1
+                    if matched >= 2: rhythm_counts[matched] = rhythm_counts.get(matched, 0) + 1
+                    break
+                elif beats_val > 0.02:
+                    rhythm_counts[0] = rhythm_counts.get(0, 0) + 1; break
+        features['fast_note_density_16th'] = fast_16th / max(dur, 0.01)
+        features['rhythm_type_count'] = len(rhythm_counts)
+
+        # ② 多押分析 (10ms bin)
+        time_bins = {}
+        for note in all_notes:
+            t_sec = time_to_seconds(note['time'], max(note.get('bpm', bpm), 1.0))
+            t_bin = round(t_sec, 2)
+            time_bins.setdefault(t_bin, []).append(note)
+        chords = [len(g) for g in time_bins.values() if len(g) >= 2]
+        features['avg_chord_size_poly'] = float(np.mean(chords)) if chords else 0.0
+    else:
+        features['fast_note_density_16th'] = 0.0
+        features['rhythm_type_count'] = 0
+        features['avg_chord_size_poly'] = 0.0
 
     return features
 
