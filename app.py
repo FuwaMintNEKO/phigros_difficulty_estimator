@@ -65,7 +65,9 @@ MF3_HIDENS_TH = 9.5     # 新尺度(方案B去冗余)官谱16+段dens P50
 MF3_SCALE_MID = 0.80    # 混合
 EFF_SCALE_LE5 = 1.50    # 双指耐力型谱: eff特征系数 (抬升)
 EFF_SCALE_DF_STACK = 1.00  # 双指堆料型谱: 不抬eff (t1: 高估Top20中18/20为双指堆料)
-DF_STACK_WMF_TH = 15.0   # 双指堆料判定: weighted_mf_per_sec>=15 (双押宽押堆料, Breakcore 19.2 vs BonusTime 9.8)
+DF_STACK_WMF_TH = 15.0   # 双指堆料判定中心: weighted_mf_per_sec (双押宽押堆料, Breakcore 19.2 vs BonusTime 9.8)
+DF_STACK_WMF_LO = 12.0   # 平滑区间下界 (wmf<12: 耐力档; 12~18: 线性过渡; >18: 堆料档)
+DF_STACK_WMF_HI = 18.0   # 平滑区间上界
 DF_WMF_SCALE = 0.60      # 双指堆料型: weighted_mf降权 (双押交互不算多指协调)
 ML_HEAVY_TH = 100        # 多面下落型多指: multi_line_sim_events>=100 (可馅蜜协调, 非真多押)
 ML_HEAVY_MF = 0.45       # 多面型: mf特征系数 (重压)
@@ -74,7 +76,8 @@ _CALIB_TABLE = [(14, 15, 0.30), (15, 16, 0.18), (16, 17, 0.05)]  # 预测时校�
 
 def compute_boost(feats, speed=1.0, is_custom=False):
     """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)
-    v11: 条件缩放(仅自制谱) — 多指谱压mf特征, 双指谱抬eff特征; 官谱保持原始权重"""
+    v11: 条件缩放(仅自制谱) — 多指谱压mf特征, 双指谱抬eff特征; 官谱保持原始权重
+    v11.3: 档位判定与数值统一用feats(与改json路径一致); wmf堆料档平滑化消除跳变"""
     CATEGORIES = {
         '密度': ['real_core_notes_per_second', 'above_avg_density_mean'],
         '配置': ['stair_density', 'stair_speed_avg', 'stair_complexity', 'stair_chord_ratio', 'chord_size_entropy', 'chord_alternation_rate', 'weighted_mf_score_per_sec', 'discrete_mf_ratio', 'position_entropy', 'avg_chord_size_poly', 'position_range_used', 'trill_density', 'multi_finger_3plus_events', 'pattern_switch_rate', 'direction_irregularity', 'drag_flick_ratio'],
@@ -94,6 +97,7 @@ def compute_boost(feats, speed=1.0, is_custom=False):
     cat_raws = {}
     cap_default = CAPS.get('_default', None)
     # v11: mf3条件缩放系数 (仅自制谱; 多指谱按密度分级; v11.2加多面型重压)
+    # v11.3: 档位判定统一用feats(与改json一致); wmf堆料档平滑化(12~18线性过渡)
     mf3 = feats.get('multi_finger_3plus_events', 0)
     dens = feats.get('above_avg_density_mean', 0)
     if mf3 >= 30 and feats.get('multi_line_sim_events', 0) >= ML_HEAVY_TH:
@@ -104,10 +108,14 @@ def compute_boost(feats, speed=1.0, is_custom=False):
         dens_scale_ml = 1.0
     else:
         mf_scale = 1.0 if mf3 <= 5 else MF3_SCALE_MID
-    # v11.2: 双指谱按wmf分档 — 堆料型(双押宽押堆料)不抬eff且wmf降权, 耐力型保持抬升
-    df_stack = (mf3 <= 5 and feats.get('weighted_mf_score_per_sec', 0) >= DF_STACK_WMF_TH)
-    eff_scale = 1.0 if mf3 >= 30 else (EFF_SCALE_DF_STACK if df_stack else (EFF_SCALE_LE5 if mf3 <= 5 else 1.0))
-    wmf_scale = DF_WMF_SCALE if df_stack else 1.0
+    if mf3 <= 5:
+        _w = feats.get('weighted_mf_score_per_sec', 0)
+        _sw = min(max((_w - DF_STACK_WMF_LO) / (DF_STACK_WMF_HI - DF_STACK_WMF_LO), 0.0), 1.0)  # 0~1
+        eff_scale = EFF_SCALE_LE5 - (EFF_SCALE_LE5 - EFF_SCALE_DF_STACK) * _sw   # 1.5 → 1.0 平滑
+        wmf_scale = 1.0 - (1.0 - DF_WMF_SCALE) * _sw                              # 1.0 → 0.6 平滑
+    else:
+        eff_scale = 1.0
+        wmf_scale = 1.0
     for fname, bl, co in MANUAL_FLAT:
         v = feats.get(fname, 0)
         pv = P95.get(fname, 0)
@@ -209,36 +217,31 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None):
     is_custom: True=自制谱(应用密度域对齐), None=自动判定"""
     if is_custom is None:
         is_custom = is_custom_chart(chart_data)
-    feats_1x = extract_features(chart_data, speed=1.0)
-    if not feats_1x:
+    # v11.3: speed 统一为"改json"行为 — BPM缩放后全量特征(含GB)参与, 阈值不额外缩放;
+    # 档位判定与数值统一用同一特征(无judge机制), wmf堆料档已平滑化
+    if speed != 1.0:
+        chart_data_scaled = apply_speed_multiplier(chart_data, speed)
+        feats = extract_features(chart_data_scaled, speed=1.0)
+    else:
+        feats = extract_features(chart_data, speed=1.0)
+    if not feats:
         return None, '特征提取失败'
     if is_custom:
-        feats_1x = apply_domain_align(feats_1x, True, level)
-    
-    x = np.array([[feats_1x.get(n, 0) for n in FN] + _level_onehot(level)])
+        feats = apply_domain_align(feats, True, level)
+
+    x = np.array([[feats.get(n, 0) for n in FN] + _level_onehot(level)])
     xs = scaler.transform(x)
     p_gb_residual = float(gb.predict(xs)[0])
 
-    if speed != 1.0:
-        chart_data_scaled = apply_speed_multiplier(chart_data, speed)
-        feats_boost = extract_features(chart_data_scaled, speed=speed)
-    else:
-        feats_boost = feats_1x
-
-    if not feats_boost:
-        return None, '特征提取失败'
-    if is_custom:
-        feats_boost = apply_domain_align(feats_boost, True, level)
-
-    p_boost, dims, key_contribs = compute_boost(feats_boost, speed=speed, is_custom=is_custom)
+    p_boost, dims, key_contribs = compute_boost(feats, speed=1.0, is_custom=is_custom)
     p_final = p_gb_residual + p_boost
     if is_custom:
         # v11.1: 定轨键盘段加成 (4k/5k/6k: 固定槽位密集击打, 多指分工双指无解; 占比归一化防长谱误伤)
-        _act = feats_1x.get('tracks_active_sec', 0)
+        _act = feats.get('tracks_active_sec', 0)
         if _act > 0:
-            _r4 = feats_1x.get('tracks_4plus_sec', 0) / _act
-            _r5 = feats_1x.get('tracks_5plus_sec', 0) / _act
-            _r6 = feats_1x.get('tracks_6plus_sec', 0) / _act
+            _r4 = feats.get('tracks_4plus_sec', 0) / _act
+            _r5 = feats.get('tracks_5plus_sec', 0) / _act
+            _r6 = feats.get('tracks_6plus_sec', 0) / _act
             p_final += 0.15 * min(_r4, 0.8) + 0.55 * min(_r5, 0.4) + 1.0 * min(_r6, 0.15)
         # v11: 预测时校准 (仅自制谱: 修正社区谱口径 vs 官谱标尺的14-16段OOD高估)
         for _lo, _hi, _adj in _CALIB_TABLE:
@@ -246,7 +249,7 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None):
                 p_final = p_final - _adj
                 break
 
-    feats_display = feats_boost if speed != 1.0 else feats_1x
+    feats_display = feats
 
     meta = {}
     if 'META' in chart_data:
