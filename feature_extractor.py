@@ -650,8 +650,8 @@ def extract_features(chart_data, speed=1.0):
     if len(active_t) > 1:
         bpm_pair = (note_bpms[active_idx[:-1]] + note_bpms[active_idx[1:]]) / 2.0
         gaps = np.abs(np.diff(active_t))
-        gaps_sec = np.array([time_to_seconds(g, max(b, 1.0), bpm_timeline)
-                             for g, b in zip(gaps, bpm_pair)])
+        # v11.15修复: 间隔秒 = tick/32*60/bpm (局部bpm), 不用积分
+        gaps_sec = gaps / 32.0 * 60.0 / np.maximum(bpm_pair, 1.0)
         pos_diffs = np.abs(np.diff(active_pos))
         valid = gaps_sec <= 0.5
         distances = pos_diffs[valid]
@@ -948,10 +948,8 @@ def extract_features(chart_data, speed=1.0):
     if n_notes > 3:
         intervals = np.diff(times)
         bpm_arr = np.array([n.get('bpm', 120.0) for n in all_notes])
-        intervals_sec = np.array([
-            time_to_seconds(intervals[i], max(bpm_arr[i], 1.0))
-            for i in range(len(intervals))
-        ])
+        # v11.15修复: 间隔秒数 = tick/32 * 60/bpm(局部bpm), 不能用积分(积分返回累计绝对时间)
+        intervals_sec = intervals / 32.0 * 60.0 / np.maximum(bpm_arr[1:], 1.0)
 
         # global: 极短间隔密度指标 — v11.14: 只算tap+hold的相邻间隔, 排除drag/flick; 排除多押(0ms)
         # 用户底线: 分音(16分/24分)只由tap+hold构成; drag(零操作)/flick不算; 0ms=多押非连续音符
@@ -1064,7 +1062,7 @@ def extract_features(chart_data, speed=1.0):
             prev_t = times[i]
         for g in range(1, len(g_sizes)):
             if (g_lines[g] == g_lines[g-1] and g_sizes[g] >= 2 and g_sizes[g-1] >= 2):
-                gap_sec = time_to_seconds(g_times[g] - g_times[g-1], max(g_bpms[g-1], 1.0))
+                gap_sec = (g_times[g] - g_times[g-1]) / 32.0 * 60.0 / max(g_bpms[g-1], 1.0)  # v11.15: 局部bpm直算
                 if gap_sec < 0.12:
                     chord_jack_steps += 1
                     if g_sizes[g] >= 3 and g_sizes[g-1] >= 3:
