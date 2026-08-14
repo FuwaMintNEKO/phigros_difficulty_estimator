@@ -19,7 +19,7 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.7b (Level-Aware GB + Boost + 多押分布 + drag滑动 + 校准0.55/0.40/0.20) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.8 (Level-Aware GB + Boost + 堆料降权 + 校准0.51/0.36/0.16) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
 _TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
@@ -116,7 +116,7 @@ ML_HEAVY_DENS = 0.85     # 多面型: 密度特征系数
 EXTREME_FEATS_COND = {'cross_hand_density', 'jline_relative_cross', 'thirtysecond_run_max', 'thirtysecond_run_ratio', 'lane_switch_density'}
 EXTREME_SCALE_DF = 1.30   # 双指谱: 换手/32分交互是AP最难点, 温和拉高
 EXTREME_SCALE_MF = 0.70   # 多指谱: 可分摊, 压低 (校准后多指仍+0.19, 强化抵抗社区虚高)
-_CALIB_TABLE = [(14, 15, 0.55), (15, 16, 0.40), (16, 17, 0.20)]  # 预测时校准(仅自制谱); v11.5c: 新特征外推+0.15, 扫描最优归零
+_CALIB_TABLE = [(14, 15, 0.51), (15, 16, 0.36), (16, 17, 0.16)]  # 预测时校准(仅自制谱); v11.8: 堆料降权后微调-0.04
 
 def compute_boost(feats, speed=1.0, is_custom=False):
     """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)
@@ -144,6 +144,8 @@ def compute_boost(feats, speed=1.0, is_custom=False):
     # v11.3: 档位判定统一用feats(与改json一致); wmf堆料档平滑化(12~18线性过渡)
     mf3 = feats.get('multi_finger_3plus_events', 0)
     dens = feats.get('above_avg_density_mean', 0)
+    # v11.8: 堆料型(≥4难点标签)boost整体降权 (玩家研究: 配置堆料谱被高估0.3-0.5; 全段×0.95 ranked MAE 0.588→0.575)
+    _stack_scale = 0.95 if (is_custom and len(compute_tags(feats)) >= 4) else 1.0
     if mf3 >= 30 and feats.get('multi_line_sim_events', 0) >= ML_HEAVY_TH:
         mf_scale = ML_HEAVY_MF       # 多面下落型(可馅蜜协调): 重压
         dens_scale_ml = ML_HEAVY_DENS
@@ -190,6 +192,7 @@ def compute_boost(feats, speed=1.0, is_custom=False):
                 co = co * wmf_scale
             if fname in EXTREME_FEATS_COND:
                 co = co * extreme_scale   # v11.5: 极端配置缩放 (AP难度视角)
+            co = co * _stack_scale   # v11.8: 堆料型降权
         x = co * (e ** excess_exp)
         if v > max(P99.get(fname, 0), bl * 0.5):
             pe = v / max(P99.get(fname, 0), bl * 0.5) - 1.0

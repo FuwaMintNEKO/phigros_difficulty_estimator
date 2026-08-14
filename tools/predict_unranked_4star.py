@@ -29,6 +29,18 @@ def level_key(s):
     if 'HD' in s: return 'HD'
     return 'IN'
 
+TAG_TH = json.load(open(os.path.join(_ROOT, 'data', 'tag_thresholds.json'), encoding='utf-8'))
+TAG_DIM = [('底力', 'above_avg_density_mean'), ('多押', 'weighted_mf_score_per_sec'),
+           ('楼梯', 'stair_speed_avg'), ('32分', 'thirtysecond_run_ratio'),
+           ('爆发', 'fast_ms_100_ratio'), ('读谱', 'jline_movement_density'),
+           ('变速', 'tempo_change_log_density'), ('耐力', 'above_avg_duration_sec'),
+           ('高BPM', 'bpm'), ('纵连', 'jack_density'), ('叠键', 'chord_jack_3plus_pairs'),
+           ('位移', 'movement_per_second')]
+def _stack_scale_for(feats):
+    n = sum(1 for _, fk in TAG_DIM if feats.get(fk, 0) >= TAG_TH.get(_, 1e9))
+    if feats.get('tracks_6plus_sec', 0) / max(feats.get('tracks_active_sec', 1), 0.01) >= TAG_TH.get('定轨', 1): n += 1
+    return 0.95 if n >= 4 else 1.0
+
 def predict(feats_raw, level='IN'):
     feats = dict(feats_raw)
     lv = level_key(level)
@@ -45,6 +57,7 @@ def predict(feats_raw, level='IN'):
     dens = feats_raw.get('above_avg_density_mean', 0)
     ml = feats_raw.get('multi_line_sim_events', 0)
     wmf = feats_raw.get('weighted_mf_score_per_sec', 0)
+    stack_scale = _stack_scale_for(feats_raw)
     if mf3 >= 30 and ml >= 100:
         mf_scale, dens_s = 0.45, 0.85
     elif mf3 >= 30:
@@ -82,6 +95,7 @@ def predict(feats_raw, level='IN'):
         if fname in DENS_FEATS and mf3 >= 30 and ml >= 100: co2 = co * dens_s
         if fname == 'weighted_mf_score_per_sec': co2 = co * wmf_scale
         if fname in EXTREME: co2 = co * extreme_scale
+        if stack_scale < 1.0: co2 = co2 * stack_scale
         x_ = co2 * (e**0.70)
         p99 = max(P99.get(fname,0), bl*0.5)
         if v > p99:
@@ -96,7 +110,7 @@ def predict(feats_raw, level='IN'):
         r5 = feats_raw.get('tracks_5plus_sec', 0) / act
         r6 = feats_raw.get('tracks_6plus_sec', 0) / act
         pred += 0.15 * min(r4, 0.8) + 0.55 * min(r5, 0.4) + 1.0 * min(r6, 0.15)
-    for lo, hi, adj in [(14,15,0.55),(15,16,0.40),(16,17,0.20)]:
+    for lo, hi, adj in [(14,15,0.51),(15,16,0.36),(16,17,0.16)]:
         if lo < pred <= hi: pred -= adj; break
     return pred, p_gb, total
 
