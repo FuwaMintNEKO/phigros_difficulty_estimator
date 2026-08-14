@@ -12,7 +12,7 @@ official = cache['official']
 sel = [r for r in official if r['diff'] >= 15]
 DIM = [
     ('底力', 'above_avg_density_mean', 75), ('多押', 'weighted_mf_score_per_sec', 75),
-    ('楼梯', 'stair_speed_avg', 75), ('32分', 'thirtysecond_run_ratio', 75),
+    ('楼梯', 'stair_speed_avg', 75), ('高速', 'fast_ms_100_ratio', 75),
     ('爆发', 'fast_ms_100_ratio', 75), ('读谱', 'jline_movement_density', 75),
     ('变速', 'tempo_change_log_density', 75), ('耐力', 'above_avg_duration_sec', 75),
     ('高BPM', 'bpm', 75), ('纵连', 'jack_density', 75), ('叠键', 'chord_jack_3plus_pairs', 75),

@@ -444,34 +444,50 @@ def extract_features(chart_data, speed=1.0):
         hold_pos = positions[hold_mask]
         hold_len = hold_times[hold_mask]
         hold_end = hold_t + hold_len
-        tap_t = times[tap_mask]
-        tap_pos = positions[tap_mask]
-
-        # 对每个hold，用二分查找找范围内的tap
-        all_lock_events = 0
+        # v11.10 锁手检测: hold长条按住期间的其他音符, 按难度加权 tap>flick>drag
+        # 用户: tap(点击,锁手最难) > flick(划动,中等) > drag(零操作,几乎无难度)
+        all_lock_tap = 0
+        all_lock_flick = 0
+        all_lock_drag = 0
         total_disp = 0.0
         max_disp = 0.0
-        tap_sorted_idx = np.argsort(tap_t)
-        tap_t_sorted = tap_t[tap_sorted_idx]
-        tap_pos_sorted = tap_pos[tap_sorted_idx]
+        lock_t = times[tap_mask | flick_mask | drag_mask]
+        lock_pos = positions[tap_mask | flick_mask | drag_mask]
+        lock_types = types[tap_mask | flick_mask | drag_mask]
+        lock_sorted_idx = np.argsort(lock_t)
+        lock_t_sorted = lock_t[lock_sorted_idx]
+        lock_pos_sorted = lock_pos[lock_sorted_idx]
+        lock_types_sorted = lock_types[lock_sorted_idx]
 
         for hi in range(n_hold):
-            left = np.searchsorted(tap_t_sorted, hold_t[hi], side='left')
-            right = np.searchsorted(tap_t_sorted, hold_end[hi], side='right')
+            left = np.searchsorted(lock_t_sorted, hold_t[hi], side='left')
+            right = np.searchsorted(lock_t_sorted, hold_end[hi], side='right')
             if right > left:
-                count = right - left
-                all_lock_events += count
-                disps = np.abs(tap_pos_sorted[left:right] - hold_pos[hi])
+                for j in range(left, right):
+                    t_ = lock_types_sorted[j]
+                    if t_ == NOTE_TAP: all_lock_tap += 1
+                    elif t_ == NOTE_FLICK: all_lock_flick += 1
+                    elif t_ == NOTE_DRAG: all_lock_drag += 1
+                disps = np.abs(lock_pos_sorted[left:right] - hold_pos[hi])
                 total_disp += float(np.sum(disps))
                 max_disp = max(max_disp, float(np.max(disps)))
 
-        features['hold_lock_tap_events'] = all_lock_events
-        features['hold_lock_tap_events_per_hold'] = all_lock_events / max(n_hold, 1)
-        features['hold_lock_avg_displacement'] = total_disp / max(all_lock_events, 1)
+        features['hold_lock_tap_events'] = all_lock_tap
+        features['hold_lock_tap_events_per_hold'] = all_lock_tap / max(n_hold, 1)
+        # v11.10: 加权锁手分 (tap×1.0 + flick×0.4 + drag×0.1) — 反映锁手实际难度贡献
+        lock_weighted = all_lock_tap * 1.0 + all_lock_flick * 0.4 + all_lock_drag * 0.1
+        features['hold_lock_weighted'] = lock_weighted
+        features['hold_lock_weighted_per_hold'] = lock_weighted / max(n_hold, 1)
+        features['hold_lock_weighted_per_sec'] = lock_weighted / max(ds, 0.01)
+        features['hold_lock_flick_events'] = all_lock_flick
+        features['hold_lock_drag_events'] = all_lock_drag
+        features['hold_lock_avg_displacement'] = total_disp / max(all_lock_tap + all_lock_flick + all_lock_drag, 1)
         features['hold_lock_max_displacement'] = max_disp
         features['hold_lock_displacement_per_sec'] = total_disp / ds
     else:
         features.update({'hold_lock_tap_events': 0, 'hold_lock_tap_events_per_hold': 0,
+                         'hold_lock_weighted': 0, 'hold_lock_weighted_per_hold': 0, 'hold_lock_weighted_per_sec': 0,
+                         'hold_lock_flick_events': 0, 'hold_lock_drag_events': 0,
                          'hold_lock_avg_displacement': 0, 'hold_lock_max_displacement': 0,
                          'hold_lock_displacement_per_sec': 0})
 
@@ -967,30 +983,19 @@ def extract_features(chart_data, speed=1.0):
         features['long_jack_count'] = int(np.sum(long_jack_runs))
         features['jack_max_run'] = int(np.max(run_lengths)) if len(run_lengths) > 0 else 0
 
-        # v11.5: 32分交互连续段 (AP难点: 高速交替; 间隔<0.125拍=32分, 位置交替>1.5格=交互非jack)
+        # v11.10: 速度归一化分档 (用户: 100bpm的32分=200bpm的16分, 按真实毫秒间隔而非拍)
+        # 拍域32分检测已删除 (thirtysecond_run_*: 用户确认没必要, BPM归一化即可)
         pos_diffs_arr = np.abs(np.diff(positions))
-        interaction = np.zeros(n_notes, dtype=bool)
-        for i in range(1, n_notes):
-            if intervals[i-1] < 0.125 and pos_diffs_arr[i-1] > 1.5:
-                interaction[i] = True
-                interaction[i-1] = True
-        iruns = np.diff(np.concatenate(([0], interaction.astype(int), [0])))
-        istarts = np.where(iruns == 1)[0]
-        iends = np.where(iruns == -1)[0]
-        ilens = iends - istarts
-        features['thirtysecond_run_max'] = int(np.max(ilens)) if len(ilens) > 0 else 0
-        features['thirtysecond_run_ratio'] = float(np.sum(interaction)) / max(n_notes, 1)
-        features['thirtysecond_run_count'] = int(len(ilens))
-
-        # v11.5: 速度归一化分档 (用户: 100bpm的32分=200bpm的16分, 按真实毫秒间隔而非拍)
-        its = intervals_sec
+        same_line_mask = jl_idx[1:] == jl_idx[:-1]
+        its_full = intervals_sec
+        its = intervals_sec[same_line_mask]  # 同线相邻 (跨线交错非手指速度)
         features['fast_ms_050_ratio'] = float(np.sum(its < 0.05)) / max(len(its), 1)
         features['fast_ms_100_ratio'] = float(np.sum((its >= 0.05) & (its < 0.10))) / max(len(its), 1)
         features['fast_ms_150_ratio'] = float(np.sum((its >= 0.10) & (its < 0.15))) / max(len(its), 1)
-        # 速度归一化交互段: 间隔<100ms且位置交替的连续run
+        # 速度归一化交互段: 同线间隔<100ms且位置交替的连续run
         itr = np.zeros(n_notes, dtype=bool)
         for i in range(1, n_notes):
-            if its[i-1] < 0.10 and pos_diffs_arr[i-1] > 1.5:
+            if its_full[i-1] < 0.10 and same_line_mask[i-1] and pos_diffs_arr[i-1] > 1.5:
                 itr[i] = True
                 itr[i-1] = True
         mrun = np.diff(np.concatenate(([0], itr.astype(int), [0])))

@@ -10,7 +10,7 @@ from boost_config import MANUAL_FLAT
 from unified_parser import load_chart_from_bytes
 from feature_extractor import extract_features
 
-with open(os.path.join(_ROOT, 'models', '6dim_model_v11_9.pkl'), 'rb') as f:
+with open(os.path.join(_ROOT, 'models', '6dim_model_v11_10.pkl'), 'rb') as f:
     m = pickle.load(f)
 gb, scaler = m['gb'], m['scaler']
 FN, P95, P99 = m['feature_names'], m['p95_vals'], m['p99_vals']
@@ -31,11 +31,11 @@ def level_key(s):
 
 TAG_TH = json.load(open(os.path.join(_ROOT, 'data', 'tag_thresholds.json'), encoding='utf-8'))
 TAG_DIM = [('底力', 'above_avg_density_mean'), ('多押', 'weighted_mf_score_per_sec'),
-           ('楼梯', 'stair_speed_avg'), ('32分', 'thirtysecond_run_ratio'),
-           ('爆发', 'fast_ms_100_ratio'), ('读谱', 'jline_movement_density'),
+           ('楼梯', 'stair_speed_avg'), ('高速', 'fast_ms_100_ratio'),
+           ('爆发', 'fast_ms_050_ratio'), ('读谱', 'jline_movement_density'),
            ('变速', 'tempo_change_log_density'), ('耐力', 'above_avg_duration_sec'),
            ('高BPM', 'bpm'), ('纵连', 'jack_density'), ('叠键', 'chord_jack_3plus_pairs'),
-           ('位移', 'movement_per_second')]
+           ('位移', 'movement_per_second'), ('锁手', 'hold_lock_weighted_per_hold')]
 _HIGH_TAGS_SET = {'叠键', '多押', '变速', '位移'}
 def _stack_scale_for(feats):
     ts = set()
@@ -43,6 +43,17 @@ def _stack_scale_for(feats):
         if feats.get(fk, 0) >= TAG_TH.get(name, 1e9): ts.add(name)
     if feats.get('tracks_6plus_sec', 0) / max(feats.get('tracks_active_sec', 1), 0.01) >= TAG_TH.get('定轨', 1): ts.add('定轨')
     return 0.92 if len(ts & _HIGH_TAGS_SET) >= 2 else 1.0
+
+_KCLF2 = None
+try:
+    import pickle as _pk
+    _KCLF2 = _pk.load(open(os.path.join(_ROOT, 'models', 'kyou_classifier.pkl'), 'rb'))
+except Exception:
+    _KCLF2 = None
+
+def _kyou_vec(feats_raw):
+    """自制谱: 全0 (与训练分布一致)"""
+    return [0.0]*6 + [0.0]
 
 def predict(feats_raw, level='IN'):
     feats = dict(feats_raw)
@@ -117,7 +128,7 @@ def predict(feats_raw, level='IN'):
     if hr >= 0.6: pred += 0.7
     elif hr >= 0.4: pred += 0.5
     elif hr >= 0.25: pred += 0.3
-    for lo, hi, adj in [(14,15,0.51),(15,16,0.36),(16,17,0.16)]:
+    for lo, hi, adj in [(14,15,0.41),(15,16,0.26),(16,17,0.06)]:
         if lo < pred <= hi: pred -= adj; break
     return pred, p_gb, total
 

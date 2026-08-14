@@ -9,7 +9,7 @@ from boost_config import MANUAL_FLAT
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_9.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_10.pkl')
 # v11.7b: 多押分布 + drag滑动密度 + 极端配置特征 + 校准0.55/0.40/0.20
 
 with open(MODEL_PATH, 'rb') as f:
@@ -19,7 +19,7 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.9 (Level-Aware GB + Boost + RPE类型修复 + tap含hold + hold加成 + 校准0.51/0.36/0.16) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.10 (Level-Aware GB + Boost + 毫秒归一化 + 锁手检测 + RPE修复 + hold加成 + 校准0.51/0.36/0.16) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
 _TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
@@ -27,11 +27,11 @@ try:
     with open(_TAG_PATH, encoding='utf-8') as _f:
         TAG_TH = json.load(_f)
     TAG_DIM = [('底力', 'above_avg_density_mean'), ('多押', 'weighted_mf_score_per_sec'),
-               ('楼梯', 'stair_speed_avg'), ('32分', 'thirtysecond_run_ratio'),
-               ('爆发', 'fast_ms_100_ratio'), ('读谱', 'jline_movement_density'),
+               ('楼梯', 'stair_speed_avg'), ('高速', 'fast_ms_100_ratio'),
+               ('爆发', 'fast_ms_050_ratio'), ('读谱', 'jline_movement_density'),
                ('变速', 'tempo_change_log_density'), ('耐力', 'above_avg_duration_sec'),
                ('高BPM', 'bpm'), ('纵连', 'jack_density'), ('叠键', 'chord_jack_3plus_pairs'),
-               ('位移', 'movement_per_second')]
+               ('位移', 'movement_per_second'), ('锁手', 'hold_lock_weighted_per_hold')]
 except Exception:
     TAG_TH = {}
     TAG_DIM = []
@@ -84,6 +84,18 @@ try:
     _KYOU_CLF = _KCLF['clf']
 except Exception:
     _KYOU_CLF = None
+
+def kyou_feat_vec(feats, name='', is_custom=True):
+    """v11.10: kyou标签one-hot特征 (仅官谱; 自制谱返回全0=与训练中无标签官谱分布一致)"""
+    KT = ['硬抗', '综合', '定位', '读谱', '拆谱', '多指']
+    if is_custom:
+        return [0.0] * len(KT) + [0.0]
+    kt = kyou_type_for(feats, name, is_custom)
+    tag = (kt or {}).get('type', '')
+    v = [0.0] * len(KT)
+    if tag in KT:
+        v[KT.index(tag)] = 1.0
+    return v + [1.0 if tag else 0.0]  # 6类 + has_tag
 
 def kyou_type_for(feats, name='', is_custom=True):
     """返回玩家共识类型: 官谱按kyou数据, 自制谱用分类器近似"""
@@ -161,7 +173,7 @@ ML_HEAVY_DENS = 0.85     # 多面型: 密度特征系数
 EXTREME_FEATS_COND = {'cross_hand_density', 'jline_relative_cross', 'thirtysecond_run_max', 'thirtysecond_run_ratio', 'lane_switch_density'}
 EXTREME_SCALE_DF = 1.30   # 双指谱: 换手/32分交互是AP最难点, 温和拉高
 EXTREME_SCALE_MF = 0.70   # 多指谱: 可分摊, 压低 (校准后多指仍+0.19, 强化抵抗社区虚高)
-_CALIB_TABLE = [(14, 15, 0.51), (15, 16, 0.36), (16, 17, 0.16)]  # 预测时校准(仅自制谱); v11.8: 堆料降权后微调-0.04
+_CALIB_TABLE = [(14, 15, 0.41), (15, 16, 0.26), (16, 17, 0.06)]  # v11.10: 删32分特征后偏差变化, 扫描最优  # 预测时校准(仅自制谱); v11.8: 堆料降权后微调-0.04
 
 def compute_boost(feats, speed=1.0, is_custom=False):
     """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)
