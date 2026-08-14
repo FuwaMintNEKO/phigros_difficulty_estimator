@@ -585,6 +585,15 @@ def extract_features(chart_data, speed=1.0):
     features['avg_hold_duration_beats'] = hold_time_sum / max(n_hold, 1)
     features['max_hold_duration_beats'] = float(np.max(hold_times)) if n_hold > 0 else 0
     features['hold_duration_ratio'] = hold_time_sum / max(dt, 0.01)
+    # v11.7: 长黄键(drag带holdTime, RPE特有) — Feeling Blue类全drag长条谱曾完全失明
+    drag_ht = hold_times[drag_mask] if n_notes > 0 else np.array([])
+    features['drag_hold_count'] = int(np.sum(drag_ht > 0))
+    features['drag_hold_time_total_beats'] = float(np.sum(drag_ht))
+    features['drag_hold_time_total_sec'] = time_to_seconds(float(np.sum(drag_ht)), bpm)
+    features['drag_hold_avg_beats'] = float(np.mean(drag_ht[drag_ht > 0])) if np.any(drag_ht > 0) else 0.0
+    features['drag_hold_ratio'] = float(np.sum(drag_ht > 0)) / max(n_drag, 1)
+    # v11.7b: 纯drag滑动谱 — drag击打密度 (Feeling Blue 820 drag/117s = 7/s)
+    features['drag_per_sec'] = n_drag / max(features['duration_sec'], 0.01)
 
     # 同时长条
     concurrent_holds = _compute_concurrent_holds(all_notes)

@@ -72,4 +72,6 @@ MANUAL_FLAT = [
     ('cross_hand_density',            4.0, 0.050),
     ('lane_switch_density',           5.0, 0.015),
     ('jline_relative_cross',          0.10, 0.040),
+    # ===== v11.7 纯drag滑动谱 (Feeling Blue类: drag_ratio高+drag密度高; RPE drag带holdTime是格式特性非难度) =====
+    ('drag_per_sec',                  3.0, 0.10),
 ]

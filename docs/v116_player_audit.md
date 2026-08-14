@@ -189,6 +189,29 @@
 4. 玩家峰值感知与模型均值分布的差异是原理性的: 预测器输出"整体难度", 玩家记住"最难点" — 可在UI标注"高潮段峰值密度"辅助
 
 
+## 长黄键 (drag+holdTime) 重大发现 — Feeling Blue 根因实锤
+
+### 诊断
+- Feeling Blue (ranked, 社区16.7, 模型10.5, **-6.2最大误差**): 全部820个音符是 type=2(drag), **全部带holdTime**(4-256, 均值12.7, 总时长112秒)
+- 现有特征: hold特征只统计type=3; drag不计核心密度 → dens=0, eff=0, 位移=0, hold时长=0 — **模型完全失明**
+- 官谱 drag 无 holdTime (瞬时点划) → 长黄键是 RPE 谱特有, 官谱无基准样本
+
+### 修复 (v11.7)
+- 新特征: drag_hold_count / drag_hold_time_total_sec / drag_hold_avg_beats / drag_hold_ratio
+- boost 权重: drag_hold_time_total_sec (bl 5.0, co 0.25) + drag_hold_ratio (bl 0.10, co 0.15)
+- 官谱无污染 (特征全0), 社区长黄键谱受益
+- 预期: Feeling Blue 10.5 → ~11.6 (保守, 官谱无基准无法完全定价, 但不再失明)
+
+
+## 纯drag滑动谱 — 官谱基准的终极边界 (Feeling Blue定论)
+- Feeling Blue (ranked 47264, AT Lv.16, 社区16.7, rating 0.897/376票=玩家认可): **全部820音符是drag(黄键)**, 820次滑动/117s = 7/s
+- RPE drag普遍带holdTime (p50=34.6s/谱) — 与定数无关(>100s组均值14.3更低) → 长黄键是格式特性非难度, v11.7方向错误已回滚
+- 官谱无纯drag谱(官谱drag是点缀) → 纯drag谱=RPE特有类型, 官谱基准无样本 → 模型10.9 vs 社区16.7 无法修复
+- v11.7b修正: drag_per_sec特征(官谱p90=3.16, Feeling Blue 6.99超官谱max) + boost 0.10
+  → Feeling Blue 10.5→10.9 (+0.4), ranked MAE 0.610→0.588(最佳), CV 0.5133
+- **结论: 纯drag滑动谱超出官谱域, 预测仅供参考; 这是"官谱唯一基准"的固有边界**
+
+
 ## 玩家视角知识笔记 (持续更新)
 
 ### Phigros 游玩要素 (来自玩家视角)
