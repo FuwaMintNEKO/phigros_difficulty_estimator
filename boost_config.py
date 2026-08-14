@@ -66,4 +66,10 @@ MANUAL_FLAT = [
     # density 降权 (愚人节多押谱误伤); 3plus_pairs(重键4k) 保留
     ('chord_jack_density',            2.0, 0.080),
     ('chord_jack_3plus_pairs',        4.0, 0.040),
+    # ===== v11.5 极端配置 (AP难度视角: 出现即拉高; 阈值=官谱IN/AT段p95级; 权重减半: GB已吸收信息, boost仅补充) =====
+    ('thirtysecond_run_max',          40.0, 0.030),
+    ('thirtysecond_run_ratio',        0.40, 0.050),
+    ('cross_hand_density',            4.0, 0.050),
+    ('lane_switch_density',           5.0, 0.015),
+    ('jline_relative_cross',          0.10, 0.040),
 ]

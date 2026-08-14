@@ -51,6 +51,7 @@ def predict(feats_raw, level='IN'):
         mf_scale, dens_s = (0.70 if dens >= 9.5 else 0.50), 1.0
     else:
         mf_scale, dens_s = (1.0 if mf3 <= 5 else 0.8), 1.0
+    EXTREME = {'cross_hand_density', 'jline_relative_cross', 'thirtysecond_run_max', 'thirtysecond_run_ratio', 'lane_switch_density'}
     if mf3 <= 5:
         _sw = min(max((wmf - 12.0) / 6.0, 0.0), 1.0)
         if dens >= 10.0:
@@ -58,8 +59,13 @@ def predict(feats_raw, level='IN'):
         else:
             eff_scale = 1.5 - 0.5 * _sw
         wmf_scale = 1.0 - 0.4 * _sw
+        extreme_scale = 1.3
+    elif mf3 >= 30:
+        eff_scale, wmf_scale = 1.0, 1.0
+        extreme_scale = 0.7
     else:
         eff_scale, wmf_scale = 1.0, 1.0
+        extreme_scale = 1.0
     total = 0.0
     cd_ = CAPS.get('_default', None)
     for fname, bl, co in FLAT:
@@ -75,6 +81,7 @@ def predict(feats_raw, level='IN'):
         elif fname in EFF_FEATS: co2 = co * eff_scale
         if fname in DENS_FEATS and mf3 >= 30 and ml >= 100: co2 = co * dens_s
         if fname == 'weighted_mf_score_per_sec': co2 = co * wmf_scale
+        if fname in EXTREME: co2 = co * extreme_scale
         x_ = co2 * (e**0.70)
         p99 = max(P99.get(fname,0), bl*0.5)
         if v > p99:
@@ -89,7 +96,7 @@ def predict(feats_raw, level='IN'):
         r5 = feats_raw.get('tracks_5plus_sec', 0) / act
         r6 = feats_raw.get('tracks_6plus_sec', 0) / act
         pred += 0.15 * min(r4, 0.8) + 0.55 * min(r5, 0.4) + 1.0 * min(r6, 0.15)
-    for lo, hi, adj in [(14,15,0.40),(15,16,0.25),(16,17,0.05)]:
+    for lo, hi, adj in [(14,15,0.55),(15,16,0.40),(16,17,0.20)]:
         if lo < pred <= hi: pred -= adj; break
     return pred, p_gb, total
 

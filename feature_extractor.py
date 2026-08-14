@@ -616,9 +616,27 @@ def extract_features(chart_data, speed=1.0):
             if gaps_sec[i-1] < 0.25 and pos_diffs[i-1] > 3.0:
                 cross_hand_count += 1
         features['cross_hand_density'] = cross_hand_count / max(ds, 0.01)
+        # v11.5: 跨线切换 (lane switch): 相邻击打位置跨lane(>1.5格), 含连续跨线run检测
+        lane_switch = pos_diffs > 1.5
+        features['lane_switch_count'] = int(np.sum(lane_switch))
+        features['lane_switch_ratio'] = float(np.mean(lane_switch)) if len(lane_switch) > 0 else 0.0
+        features['lane_switch_density'] = features['lane_switch_count'] / max(ds, 0.01)
+        # 连续跨线run (>=2连续跨线 = 跨线穿梭段)
+        if len(lane_switch) > 0:
+            ls_int = lane_switch.astype(int)
+            runs = np.diff(np.concatenate(([0], ls_int, [0])))
+            starts = np.where(runs == 1)[0]
+            ends = np.where(runs == -1)[0]
+            run_lens = ends - starts
+            features['crossline_chain_max'] = int(np.max(run_lens)) if len(run_lens) > 0 else 0
+            features['crossline_chain_ratio'] = float(np.sum(run_lens >= 3)) / max(len(lane_switch), 1)
+        else:
+            features['crossline_chain_max'] = 0
+            features['crossline_chain_ratio'] = 0.0
     else:
         features.update({'avg_movement': 0, 'total_movement': 0, 'max_movement': 0, 'movement_per_second': 0,
-                         'cross_hand_density': 0})
+                         'cross_hand_density': 0, 'lane_switch_count': 0, 'lane_switch_ratio': 0.0,
+                         'lane_switch_density': 0.0, 'crossline_chain_max': 0, 'crossline_chain_ratio': 0.0})
     # 位移×密度复合: 大位移交互(238bpm长段位移) 的位移强度随密度放大 (Verrückt 底力门槛)
     features['movement_density_index'] = features.get('movement_per_second', 0) * features.get('real_core_notes_per_second', 0)
 
@@ -636,6 +654,9 @@ def extract_features(chart_data, speed=1.0):
         features.update({'speed_mean': 1.0, 'speed_std': 0, 'speed_max': 1.0, 'speed_min': 1.0, 'speed_range': 0})
     # speed_volatility: 流速忽慢忽快程度（读谱干扰）
     features['speed_volatility'] = features.get('speed_std', 0) * features['speed_event_density']
+    # v11.5: log压缩 (树模型对OOD极端值平台化, log可外推)
+    features['speed_event_log_density'] = float(np.log1p(features['speed_event_density']))
+    features['speed_volatility_log'] = float(np.log1p(features['speed_volatility']))
 
     features['first_note_time'] = float(times[0])
     features['last_note_time'] = float(times[-1])
@@ -913,12 +934,46 @@ def extract_features(chart_data, speed=1.0):
         features['long_jack_count'] = int(np.sum(long_jack_runs))
         features['jack_max_run'] = int(np.max(run_lengths)) if len(run_lengths) > 0 else 0
 
+        # v11.5: 32分交互连续段 (AP难点: 高速交替; 间隔<0.125拍=32分, 位置交替>1.5格=交互非jack)
+        pos_diffs_arr = np.abs(np.diff(positions))
+        interaction = np.zeros(n_notes, dtype=bool)
+        for i in range(1, n_notes):
+            if intervals[i-1] < 0.125 and pos_diffs_arr[i-1] > 1.5:
+                interaction[i] = True
+                interaction[i-1] = True
+        iruns = np.diff(np.concatenate(([0], interaction.astype(int), [0])))
+        istarts = np.where(iruns == 1)[0]
+        iends = np.where(iruns == -1)[0]
+        ilens = iends - istarts
+        features['thirtysecond_run_max'] = int(np.max(ilens)) if len(ilens) > 0 else 0
+        features['thirtysecond_run_ratio'] = float(np.sum(interaction)) / max(n_notes, 1)
+        features['thirtysecond_run_count'] = int(len(ilens))
+
+        # v11.5: 速度归一化分档 (用户: 100bpm的32分=200bpm的16分, 按真实毫秒间隔而非拍)
+        its = intervals_sec
+        features['fast_ms_050_ratio'] = float(np.sum(its < 0.05)) / max(len(its), 1)
+        features['fast_ms_100_ratio'] = float(np.sum((its >= 0.05) & (its < 0.10))) / max(len(its), 1)
+        features['fast_ms_150_ratio'] = float(np.sum((its >= 0.10) & (its < 0.15))) / max(len(its), 1)
+        # 速度归一化交互段: 间隔<100ms且位置交替的连续run
+        itr = np.zeros(n_notes, dtype=bool)
+        for i in range(1, n_notes):
+            if its[i-1] < 0.10 and pos_diffs_arr[i-1] > 1.5:
+                itr[i] = True
+                itr[i-1] = True
+        mrun = np.diff(np.concatenate(([0], itr.astype(int), [0])))
+        mst = np.where(mrun == 1)[0]; mend = np.where(mrun == -1)[0]
+        mlens = mend - mst
+        features['interaction_ms_run_max'] = int(np.max(mlens)) if len(mlens) > 0 else 0
+        features['interaction_ms_run_ratio'] = float(np.sum(itr)) / max(n_notes, 1)
+
         tempo_change = 0
         for i in range(1, len(intervals)):
             if intervals[i] > intervals[i-1] * 1.5 or intervals[i] < intervals[i-1] * 0.67:
                 tempo_change += 1
         features['tempo_change_count'] = tempo_change
         features['tempo_change_ratio'] = tempo_change / max(len(intervals), 1)
+        # v11.5: 节奏突变密度 log压缩 (变速欺诈谱: 密度高但变速频繁)
+        features['tempo_change_log_density'] = float(np.log1p(tempo_change / max(ds, 0.01)))
 
     # ====== 音符级差速 (note speed 字段, 默认1.0; 官谱/RPE音符均可能携带) ======
     # 差速 = 按键流速变化 (Retribution 全程差速, 含 speed=500/2000 极端值)
@@ -1250,6 +1305,8 @@ def extract_features(chart_data, speed=1.0):
     features['jline_movement_density'] = jline_move_total / max(ds, 0.01)
     features['jline_rotate_density'] = jline_rotate_total / max(ds, 0.01)
     features['jline_disappear_density'] = jline_disappear_total / max(ds, 0.01)
+    # v11.5: 欺诈跨线比 — 判定线几乎不动但音符跨线密集 (3rd Avenue类: 视觉无引导手指要跨)
+    features['jline_relative_cross'] = features.get('cross_hand_density', 0) / max(features['jline_movement_density'], 1.0)
     features['above_below_cross'] = 1.0 if has_above_notes and has_below_notes else 0.0
 
     # ====== stop-go ======

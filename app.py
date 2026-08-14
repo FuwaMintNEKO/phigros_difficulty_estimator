@@ -9,8 +9,8 @@ from boost_config import MANUAL_FLAT
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_4.pkl')
-# v11.4: RPE_TYPE_MAP修复 (type2=Hold/type4=Drag, 原映射反了) + v11.2密度去冗余 + 定轨段
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_5c.pkl')
+# v11.5c: 极端配置特征(32分交互/换手/跨线/变速log/速度归一化毫秒分档) + 校准0.55/0.40/0.20
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -19,7 +19,7 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.4 (Level-Aware GB + Boost + RPE类型修复 + 密度去冗余 + 校准) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.5c (Level-Aware GB + Boost + 极端配置特征 + 校准0.55/0.40/0.20) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 密度域对齐 (自制谱专属, 以官谱分布为目标) =====
 # 自制谱 IN(14-16.5) 密度特征系统性高于官谱同段 (domain gap, 含 drag 填充),
@@ -72,7 +72,12 @@ DF_WMF_SCALE = 0.60      # 双指堆料型: weighted_mf降权 (双押交互不�
 ML_HEAVY_TH = 100        # 多面下落型多指: multi_line_sim_events>=100 (可馅蜜协调, 非真多押)
 ML_HEAVY_MF = 0.45       # 多面型: mf特征系数 (重压)
 ML_HEAVY_DENS = 0.85     # 多面型: 密度特征系数
-_CALIB_TABLE = [(14, 15, 0.40), (15, 16, 0.25), (16, 17, 0.05)]  # 预测时校准(仅自制谱, 按预测值段); v11.4: RPE修复后偏差微调
+# v11.5 极端配置缩放 (AP难度视角: 官谱按AP定数, 极端配置出现即拉高)
+# 双指谱: 换手/32分交互/跨线 = AP最难点 → 拉高; 多指谱: 可多指分摊/换手 → 压低(防社区多指虚高)
+EXTREME_FEATS_COND = {'cross_hand_density', 'jline_relative_cross', 'thirtysecond_run_max', 'thirtysecond_run_ratio', 'lane_switch_density'}
+EXTREME_SCALE_DF = 1.30   # 双指谱: 换手/32分交互是AP最难点, 温和拉高
+EXTREME_SCALE_MF = 0.70   # 多指谱: 可分摊, 压低 (校准后多指仍+0.19, 强化抵抗社区虚高)
+_CALIB_TABLE = [(14, 15, 0.55), (15, 16, 0.40), (16, 17, 0.20)]  # 预测时校准(仅自制谱); v11.5c: 新特征外推+0.15, 扫描最优归零
 
 def compute_boost(feats, speed=1.0, is_custom=False):
     """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)
@@ -116,9 +121,15 @@ def compute_boost(feats, speed=1.0, is_custom=False):
         else:
             eff_scale = EFF_SCALE_LE5 - (EFF_SCALE_LE5 - EFF_SCALE_DF_STACK) * _sw   # 低密耐力型: 1.5 → 1.0 平滑
         wmf_scale = 1.0 - (1.0 - DF_WMF_SCALE) * _sw                              # 1.0 → 0.6 平滑
+        extreme_scale = EXTREME_SCALE_DF
+    elif mf3 >= 30:
+        eff_scale = 1.0
+        wmf_scale = 1.0
+        extreme_scale = EXTREME_SCALE_MF
     else:
         eff_scale = 1.0
         wmf_scale = 1.0
+        extreme_scale = 1.0
     for fname, bl, co in MANUAL_FLAT:
         v = feats.get(fname, 0)
         pv = P95.get(fname, 0)
@@ -138,6 +149,8 @@ def compute_boost(feats, speed=1.0, is_custom=False):
                 co = co * dens_scale_ml
             if fname == 'weighted_mf_score_per_sec':
                 co = co * wmf_scale
+            if fname in EXTREME_FEATS_COND:
+                co = co * extreme_scale   # v11.5: 极端配置缩放 (AP难度视角)
         x = co * (e ** excess_exp)
         if v > max(P99.get(fname, 0), bl * 0.5):
             pe = v / max(P99.get(fname, 0), bl * 0.5) - 1.0
