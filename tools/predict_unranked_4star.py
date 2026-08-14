@@ -10,7 +10,7 @@ from boost_config import MANUAL_FLAT
 from unified_parser import load_chart_from_bytes
 from feature_extractor import extract_features
 
-with open(os.path.join(_ROOT, 'models', '6dim_model_v11_7b.pkl'), 'rb') as f:
+with open(os.path.join(_ROOT, 'models', '6dim_model_v11_9.pkl'), 'rb') as f:
     m = pickle.load(f)
 gb, scaler = m['gb'], m['scaler']
 FN, P95, P99 = m['feature_names'], m['p95_vals'], m['p99_vals']
