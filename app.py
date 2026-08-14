@@ -9,8 +9,8 @@ from boost_config import MANUAL_FLAT
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_2.pkl')
-# v11.2: 方案B密度去冗余 (above_avg_density_mean改有效击打数) + 双指堆料档 + 定轨段
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_4.pkl')
+# v11.4: RPE_TYPE_MAP修复 (type2=Hold/type4=Drag, 原映射反了) + v11.2密度去冗余 + 定轨段
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -19,7 +19,7 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.2 (Level-Aware GB + Boost + 密度去冗余 + 条件缩放 + 校准) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.4 (Level-Aware GB + Boost + RPE类型修复 + 密度去冗余 + 校准) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 密度域对齐 (自制谱专属, 以官谱分布为目标) =====
 # 自制谱 IN(14-16.5) 密度特征系统性高于官谱同段 (domain gap, 含 drag 填充),
@@ -63,8 +63,8 @@ MF3_SCALE_GE30 = 0.50   # 低密度多指谱(堆料型): mf特征系数 (压制O
 MF3_SCALE_HIDENS = 0.70 # 高密度多指谱(真材实料): 少压
 MF3_HIDENS_TH = 9.5     # 新尺度(方案B去冗余)官谱16+段dens P50
 MF3_SCALE_MID = 0.80    # 混合
-EFF_SCALE_LE5 = 1.50    # 双指耐力型谱: eff特征系数 (抬升)
-EFF_SCALE_DF_STACK = 1.00  # 双指堆料型谱: 不抬eff (t1: 高估Top20中18/20为双指堆料)
+EFF_SCALE_LE5 = 1.50    # 双指低密耐力型谱(dens<10): eff特征系数 (抬升)
+EFF_SCALE_DF_STACK = 1.00  # 双指高密谱(dens>=10): 不抬eff (官谱双指高难dens均>=10且不抬, 保持一致; 高估Top20中18/20为双指堆料)
 DF_STACK_WMF_TH = 15.0   # 双指堆料判定中心: weighted_mf_per_sec (双押宽押堆料, Breakcore 19.2 vs BonusTime 9.8)
 DF_STACK_WMF_LO = 12.0   # 平滑区间下界 (wmf<12: 耐力档; 12~18: 线性过渡; >18: 堆料档)
 DF_STACK_WMF_HI = 18.0   # 平滑区间上界
@@ -72,7 +72,7 @@ DF_WMF_SCALE = 0.60      # 双指堆料型: weighted_mf降权 (双押交互不�
 ML_HEAVY_TH = 100        # 多面下落型多指: multi_line_sim_events>=100 (可馅蜜协调, 非真多押)
 ML_HEAVY_MF = 0.45       # 多面型: mf特征系数 (重压)
 ML_HEAVY_DENS = 0.85     # 多面型: 密度特征系数
-_CALIB_TABLE = [(14, 15, 0.30), (15, 16, 0.18), (16, 17, 0.05)]  # 预测时校准(仅自制谱, 按预测值段)
+_CALIB_TABLE = [(14, 15, 0.40), (15, 16, 0.25), (16, 17, 0.05)]  # 预测时校准(仅自制谱, 按预测值段); v11.4: RPE修复后偏差微调
 
 def compute_boost(feats, speed=1.0, is_custom=False):
     """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)
@@ -111,7 +111,10 @@ def compute_boost(feats, speed=1.0, is_custom=False):
     if mf3 <= 5:
         _w = feats.get('weighted_mf_score_per_sec', 0)
         _sw = min(max((_w - DF_STACK_WMF_LO) / (DF_STACK_WMF_HI - DF_STACK_WMF_LO), 0.0), 1.0)  # 0~1
-        eff_scale = EFF_SCALE_LE5 - (EFF_SCALE_LE5 - EFF_SCALE_DF_STACK) * _sw   # 1.5 → 1.0 平滑
+        if dens >= 10.0:
+            eff_scale = EFF_SCALE_DF_STACK   # 高密双指: 不抬eff (官谱双指高难一致)
+        else:
+            eff_scale = EFF_SCALE_LE5 - (EFF_SCALE_LE5 - EFF_SCALE_DF_STACK) * _sw   # 低密耐力型: 1.5 → 1.0 平滑
         wmf_scale = 1.0 - (1.0 - DF_WMF_SCALE) * _sw                              # 1.0 → 0.6 平滑
     else:
         eff_scale = 1.0

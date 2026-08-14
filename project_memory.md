@@ -97,3 +97,11 @@ kyou标签投票分析结论(11.7/11.9): 变速/闪现仍低估(-0.13), 面海+0
 - 现: speed参数 = 先apply_speed_multiplier(BPM×speed) 再按1x逻辑全量预测(GB+boost都吃缩放特征, 阈值不额外缩放)
 - 效果: speed参数与"改BPM的json"预测完全一致; スタートリップ 2x: 11.86→14.06
 - 说明: extract_features 的 speed 参数(秒级阈值缩放)在speed!=1.0时不再使用, 统一走改json路径
+
+## v11.4 RPE_TYPE_MAP 修复（2026-08）
+
+- **Bug**: predict_rpe.py RPE_TYPE_MAP={1:1,2:3,3:4,4:2} 把 RPE type2(Hold)映射成Flick、type4(Drag)映射成Hold（历史对话误将标准Hold记成type3）
+- **铁证**: 3rd Avenue/WaH!/Aurora 三谱验证 — type2 的 endTime-startTime 100%>0(均值3.3拍)=Hold; type3 瞬时+位置窄(3-4个)=Flick; type4 瞬时+位置广=Drag
+- **修复**: RPE_TYPE_MAP={1:1,2:2,3:3,4:4}（RPE与标准type编号一致）
+- **影响**: 所有RPE谱的Hold/Flick/Drag类型修正(官谱不受影响); 上架589 MAE 0.47-0.55→0.50-0.57(略升, 校准表待按新分布微调); 3rd Avenue 405个假Hold(实为Drag)纠正
+- **模型**: models/6dim_model_v11_4.pkl（CV 0.5200 与v11.2持平, 官谱无损）

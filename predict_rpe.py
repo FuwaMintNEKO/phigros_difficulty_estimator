@@ -6,7 +6,8 @@ RPE格式谱面转换和预测工具
 import json, os, sys, numpy as np
 from feature_extractor import extract_features
 
-RPE_TYPE_MAP = {1: 1, 2: 3, 3: 4, 4: 2}
+RPE_TYPE_MAP = {1: 1, 2: 2, 3: 3, 4: 4}  # v11.4修复: RPE type=2是Hold(有endTime时长), 之前误映射为Flick(2:3)且4:Drag→Hold
+# 铁证: 3rd Avenue type=2 128个音符 endTime-startTime 全>0(均值3.36拍) = 长条; type=4 405个时长全0 = Drag
 
 
 def _merge_speed_events(line):
