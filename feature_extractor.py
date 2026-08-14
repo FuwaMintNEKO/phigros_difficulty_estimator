@@ -300,6 +300,28 @@ def extract_features(chart_data, speed=1.0):
     features['avg_simultaneous'] = simultaneous['avg']
     features['simultaneous_event_count'] = simultaneous['event_count']
     features['simultaneous_ratio'] = simultaneous['event_count'] / max(n_notes, 1)
+    # v11.6: 多押时间分布 (玩家视角: 多押密集段/间歇型 vs 全程型)
+    _ev_times = simultaneous.get('event_times', [])
+    _ev_bpms = simultaneous.get('event_bpms', [])
+    if len(_ev_times) > 1:
+        try:
+            _ev_sec = np.array([time_to_seconds(t, max(b, 1.0), bpm_timeline) for t, b in zip(_ev_times, _ev_bpms)])
+            _ds_eff = max(features['duration_sec'], 1.0)
+            _nb1 = max(int(np.ceil(_ds_eff)), 1)
+            _h1, _ = np.histogram(_ev_sec, bins=_nb1, range=(0, _ds_eff))
+            features['chord_events_peak_1s'] = float(_h1.max()) if len(_h1) else 0.0
+            _nb8 = max(int(np.ceil(_ds_eff / 8.0)), 1)
+            _h8, _ = np.histogram(_ev_sec, bins=_nb8, range=(0, _ds_eff))
+            features['chord_events_peak_8s'] = float(_h8.max()) if len(_h8) else 0.0
+            features['chord_heavy_ratio_8s'] = float(np.mean(_h8 >= 20)) if len(_h8) else 0.0
+        except Exception:
+            features['chord_events_peak_1s'] = 0.0
+            features['chord_events_peak_8s'] = 0.0
+            features['chord_heavy_ratio_8s'] = 0.0
+    else:
+        features['chord_events_peak_1s'] = 0.0
+        features['chord_events_peak_8s'] = 0.0
+        features['chord_heavy_ratio_8s'] = 0.0
 
     mf = simultaneous['multi_finger_events']
     features['multi_finger_3plus_events'] = mf['count_3plus']
@@ -1824,9 +1846,13 @@ def _compute_simultaneous_notes(notes):
     discrete_mf_count = 0    # 离散型多指事件计数
     total_mf_events = 0      # 多指事件总数
 
+    event_times = []   # v11.6: 和弦事件时间序列 (多押分布特征)
+    event_bpms = []
     for tk, notes_in_window in windows.items():
         sz = len(notes_in_window)
         if sz > 1:
+            event_times.append(tk)
+            event_bpms.append(notes_in_window[0].get('bpm', 120.0))
             max_sim = max(max_sim, sz)
             total_sim += sz
             event_count += 1
@@ -1865,6 +1891,8 @@ def _compute_simultaneous_notes(notes):
         'discrete_mf_ratio': discrete_mf_count / max(total_mf_events, 1),
         'total_mf_events': total_mf_events,
         'single_events': len(windows) - event_count,   # 单押窗口数 (v11修复: 熵分布需含单押)
+        'event_times': event_times,   # v11.6
+        'event_bpms': event_bpms,     # v11.6
     }
 
 

@@ -9,8 +9,8 @@ from boost_config import MANUAL_FLAT
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_5c.pkl')
-# v11.5c: 极端配置特征(32分交互/换手/跨线/变速log/速度归一化毫秒分档) + 校准0.55/0.40/0.20
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_6.pkl')
+# v11.6: 多押时间分布特征(chord_events_peak_1s/8s, heavy_ratio) + 极端配置特征 + 校准0.55/0.40/0.20
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -19,7 +19,7 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.5c (Level-Aware GB + Boost + 极端配置特征 + 校准0.55/0.40/0.20) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.6 (Level-Aware GB + Boost + 多押分布 + 极端配置 + 校准0.55/0.40/0.20) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 密度域对齐 (自制谱专属, 以官谱分布为目标) =====
 # 自制谱 IN(14-16.5) 密度特征系统性高于官谱同段 (domain gap, 含 drag 填充),
