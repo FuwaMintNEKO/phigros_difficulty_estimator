@@ -6,8 +6,10 @@ RPE格式谱面转换和预测工具
 import json, os, sys, numpy as np
 from feature_extractor import extract_features
 
-RPE_TYPE_MAP = {1: 1, 2: 2, 3: 3, 4: 4}  # v11.4修复: RPE type=2是Hold(有endTime时长), 之前误映射为Flick(2:3)且4:Drag→Hold
-# 铁证: 3rd Avenue type=2 128个音符 endTime-startTime 全>0(均值3.36拍) = 长条; type=4 405个时长全0 = Drag
+RPE_TYPE_MAP = {1: 1, 2: 3, 3: 4, 4: 2}  # v11.8c修复: RPE type2=Hold(带endTime, 需长按)→标准3; type3=Flick(瞬时少位置)→标准4; type4=Drag(瞬时多位置)→标准2
+# 铁证1: 3rd Avenue type=2 128个音符 endTime-startTime 全>0(均值3.36拍) = 长条(Hold)
+# 铁证2: 用户实测 Feeling Blue (47264) 游戏内全部为Hold长按 — 旧映射{2:2}把它解析成Drag导致完全失明(预测10.9 vs 实际≈16)
+# 与PE映射同构: pe_type_map {'n1':1,'n2':3,'n3':4,'n4':2}
 
 
 def _merge_speed_events(line):
