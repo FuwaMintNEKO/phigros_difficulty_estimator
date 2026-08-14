@@ -1019,9 +1019,42 @@ def extract_features(chart_data, speed=1.0):
         # v11.5: 节奏突变密度 log压缩 (变速欺诈谱: 密度高但变速频繁)
         features['tempo_change_log_density'] = float(np.log1p(tempo_change / max(ds, 0.01)))
 
-    # ====== 音符级差速 (note speed 字段, 默认1.0; 官谱/RPE音符均可能携带) ======
-    # 差速 = 按键流速变化 (Retribution 全程差速, 含 speed=500/2000 极端值)
+    # ====== 音符级差速 (note speed 字段, 默认1.0) ======
+    # v11.15d: RPE谱音符speed全1.0但判定线有speedEvents → 从speedEvents插值音符落速
+    # (官谱: 音符自带speed; RPE: 用线级speedEvents)
     note_speeds = np.array([float(n.get('speed', 1.0) or 1.0) for n in all_notes])
+    if np.all(note_speeds == 1.0) and speed_events:
+        # 按线构建 speedEvent 插值 (value已归一化)
+        line_se = {}
+        for ev in speed_events:
+            li = ev.get('line_idx', 0)
+            line_se.setdefault(li, []).append(ev)
+        for i, n in enumerate(all_notes):
+            li = n.get('judge_line_idx', 0)
+            se_list = line_se.get(li)
+            if not se_list:
+                continue
+            # 找覆盖该音符时间的 speedEvent (startTime可能是[m,b,d]或float tick)
+            nt = n.get('time', 0)
+            best = 1.0; found = False
+            for ev in se_list:
+                st = ev.get('startTime'); et = ev.get('endTime')
+                # 转换时间: 官谱float tick; RPE [m,b,d]
+                def _tick(x):
+                    if isinstance(x, list) and len(x) >= 3:
+                        return (x[0] + x[1]/max(x[2],1)) * 32.0
+                    if isinstance(x, (int, float)):
+                        return float(x)
+                    return None
+                stt = _tick(st); ett = _tick(et)
+                if stt is None and ett is None:
+                    continue
+                if stt is None: stt = -1e12
+                if ett is None: ett = 1e12
+                if stt <= nt <= ett:
+                    best = ev.get('value', 1.0); found = True
+            if found:
+                note_speeds[i] = best
     log_speeds = np.log2(np.maximum(note_speeds, 1.0))
     speed_non1 = note_speeds != 1.0
     features['note_speed_non1_count'] = int(np.sum(speed_non1))
