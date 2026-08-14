@@ -130,7 +130,7 @@ def predict(feats_raw, level='IN'):
     if hr >= 0.6: pred += 0.7
     elif hr >= 0.4: pred += 0.5
     elif hr >= 0.25: pred += 0.3
-    for lo, hi, adj in [(14,15,0.51),(15,16,0.36),(16,17,0.16)]:
+    for lo, hi, adj in [(12,13,-0.30),(13,14,-0.15),(14,15,0.05),(15,16,0.10),(16,16.5,0.10),(16.5,17,0.20),(17,99,0.05)]:
         if lo < pred <= hi: pred -= adj; break
     return pred, p_gb, total
 

@@ -26,7 +26,7 @@ LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 # v11.12: 权重统一用 boost_config (手工调优层; 锚点调优后pkl内旧权重作废)
 MANUAL_FLAT = MANUAL_FLAT
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.12 (锚点调优: drag/纵连降权 + 耐力/速度提升 + jline P95修正 + 段降权) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.13 (MAE最优: 细校准7段 + 权重重扫(MAE=0.396) + jline P95修正 + 段降权) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
 _TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
@@ -180,7 +180,8 @@ ML_HEAVY_DENS = 0.85     # 多面型: 密度特征系数
 EXTREME_FEATS_COND = {'cross_hand_density', 'jline_relative_cross', 'thirtysecond_run_max', 'thirtysecond_run_ratio', 'lane_switch_density'}
 EXTREME_SCALE_DF = 1.30   # 双指谱: 换手/32分交互是AP最难点, 温和拉高
 EXTREME_SCALE_MF = 0.70   # 多指谱: 可分摊, 压低 (校准后多指仍+0.19, 强化抵抗社区虚高)
-_CALIB_TABLE = [(14, 15, 0.51), (15, 16, 0.36), (16, 17, 0.16)]  # v11.10: 删32分特征后偏差变化, 扫描最优  # 预测时校准(仅自制谱); v11.8: 堆料降权后微调-0.04
+# v11.13: 细校准7段 (上架410首MAE最优; 负值=抬升低估段, 正值=压低高估段)
+_CALIB_TABLE = [(12, 13, -0.30), (13, 14, -0.15), (14, 15, 0.05), (15, 16, 0.10), (16, 16.5, 0.10), (16.5, 17, 0.20), (17, 99, 0.05)]
 
 def compute_boost(feats, speed=1.0, is_custom=False):
     """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)

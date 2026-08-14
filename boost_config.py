@@ -10,9 +10,9 @@
 MANUAL_FLAT = [
     # ===== 密度 (2:8 = 总体:高潮段) =====
     ('real_core_notes_per_second', 2.0, 0.08),
-    ('above_avg_density_mean',       4.0, 0.288),  # v11.12锚点: 密度×0.9 (中段堆料偏高)
+    ('above_avg_density_mean',       4.0, 0.352),  # v11.13最终: 密度×1.1
     # 有效单指密度 (同押去冗余, 区分"多指全押顺手"vs"单指连打底力"; volcanic 4押海 vs D321 键盘)
-    ('eff_peak_tps_1s',              8.0, 0.22),   # v11.12锚点: 有效单指密度×1.1 (真速度)
+    ('eff_peak_tps_1s',              8.0, 0.18),   # v11.13最终: eff×0.9
     ('eff_avg_tps_1s',               4.0, 0.08),
     # ===== 配置 (全保留) =====
     ('stair_density',                 1.0, 0.022),
@@ -21,9 +21,9 @@ MANUAL_FLAT = [
     ('stair_chord_ratio',             0.3, 0.008),
     ('chord_size_entropy',            0.5, 0.034),
     ('chord_complexity',              0.3, 0.030),
-    ('chord_alternation_rate',        0.5, 0.1344), # v11.12锚点: 和弦交替×0.7
+    ('chord_alternation_rate',        0.5, 0.1152), # v11.13最终: 和弦交替×0.6
     ('chord_chord_alt_rate',          0.3, 0.030),
-    ('weighted_mf_score_per_sec',    10.0, 0.1584), # v11.12锚点: 多押×0.9
+    ('weighted_mf_score_per_sec',    10.0, 0.1272), # v11.13最终: 多押×0.85*0.85≈0.72
     ('discrete_mf_ratio',             0.3, 0.006),
     ('position_entropy',              2.0, 0.054),
     ('avg_chord_size_poly',           2.0, 0.050),
@@ -34,26 +34,26 @@ MANUAL_FLAT = [
     ('direction_irregularity',        0.5, 0.014),
     ('drag_flick_ratio',              0.2, 0.030),
     # ===== 位移 (修复阈值后: 大位移交互238bpm的每秒位移; 复合=位移×密度) =====
-    ('movement_per_second',           6.0, 0.066),  # v11.12锚点: 位移×1.1
+    ('movement_per_second',           6.0, 0.060),  # v11.13最终: 位移×1.0
     ('movement_density_index',       30.0, 0.060),
     # ===== 耐力 (高潮段秒数) =====
-    ('above_avg_duration_sec',       30.0, 0.50),   # v11.12锚点: 耐力×1.25 (长谱真难)
+    ('above_avg_duration_sec',       30.0, 0.56),   # v11.13最终: 耐力×1.4
     # ===== 读谱 (权重降低 ~40%) =====
     ('tempo_change_count',            50.0, 0.028),
     ('rhythm_entropy',                2.5, 0.058),
-    ('type_switch_per_sec',           0.4, 0.140),  # v11.12锚点: 类型切换×1.4 (FREEDOM)
+    ('type_switch_per_sec',           0.4, 0.100),  # v11.13最终: 类型切换×1.0
     ('note_clutter_ratio',            0.05, 0.032),
     ('density_transition_mean',       0.15, 0.026),
-    ('density_transition_std',        0.2, 0.032),  # v11.12锚点: 密度波动×0.5
+    ('density_transition_std',        0.2, 0.0448), # v11.13最终: 密度波动×0.7
     ('hold_interference_index',       0.3, 0.058),
-    ('jline_movement_density',        50.0, 0.038),  # v11.12锚点: 判定线移动×0.5 (演出非难度)
-    ('jline_rotate_density',          20.0, 0.048),
+    ('jline_movement_density',        50.0, 0.0228), # v11.13最终: 判定线移动×0.3
+    ('jline_rotate_density',          20.0, 0.0307), # v11.13最终: 判定线旋转×0.64
     ('jline_disappear_density',       20.0, 0.046),
     ('speed_volatility',              0.1, 0.050),
     ('above_below_cross',             0.3, 0.044),
     # ===== 重键 jack (特征已计算但此前未进入boost; 保守权重, 防误伤同线谱) =====
     ('jack_density',                  2.0, 0.030),
-    ('jack_max_run',                  2.0, 0.012),  # v11.12锚点: 纵连×0.4 (多指分摊)
+    ('jack_max_run',                  2.0, 0.021),  # v11.13最终: 纵连×0.7
     ('same_line_jack_ratio',          0.1, 0.050),
     ('long_jack_count',               4.0, 0.020),
     # ===== 差速/闪现 (音符级 speed 与 visibleTime; 阈值提高+权重降低, 仅极端差速触发) =====
@@ -73,5 +73,5 @@ MANUAL_FLAT = [
     ('lane_switch_density',           5.0, 0.015),
     ('jline_relative_cross',          0.10, 0.040),
     # ===== v11.7 纯drag滑动谱 (Feeling Blue类: drag_ratio高+drag密度高; RPE drag带holdTime是格式特性非难度) =====
-    ('drag_per_sec',                  3.0, 0.025),  # v11.12锚点: drag×0.25 (用户实测零操作)
+    ('drag_per_sec',                  3.0, 0.040),  # v11.13最终: drag×0.4
 ]
