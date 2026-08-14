@@ -9,7 +9,7 @@ from boost_config import MANUAL_FLAT
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_7b.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_9.pkl')
 # v11.7b: 多押分布 + drag滑动密度 + 极端配置特征 + 校准0.55/0.40/0.20
 
 with open(MODEL_PATH, 'rb') as f:
@@ -19,7 +19,7 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.8b (Level-Aware GB + Boost + 精细降权high2 + 校准0.51/0.36/0.16) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.9 (Level-Aware GB + Boost + RPE类型修复 + tap含hold + hold加成 + 校准0.51/0.36/0.16) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
 _TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
@@ -347,6 +347,14 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None, chart_n
             _r5 = feats.get('tracks_5plus_sec', 0) / _act
             _r6 = feats.get('tracks_6plus_sec', 0) / _act
             p_final += 0.15 * min(_r4, 0.8) + 0.55 * min(_r5, 0.4) + 1.0 * min(_r6, 0.15)
+        # v11.8c: hold占比加成 (用户实测: 全长条谱难度应略高于同密度tap谱; 相关-0.28系统低估)
+        _hr = feats.get('hold_count', 0) / max(feats.get('total_notes', 1), 1)
+        if _hr >= 0.6:
+            p_final += 0.7
+        elif _hr >= 0.4:
+            p_final += 0.5
+        elif _hr >= 0.25:
+            p_final += 0.3
         # v11: 预测时校准 (仅自制谱: 修正社区谱口径 vs 官谱标尺的14-16段OOD高估)
         for _lo, _hi, _adj in _CALIB_TABLE:
             if _lo < p_final <= _hi:

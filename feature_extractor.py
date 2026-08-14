@@ -281,7 +281,8 @@ def extract_features(chart_data, speed=1.0):
 
     features['density_skew'] = float(np.mean(_density(4))) if _density(4).size > 0 else 0
 
-    t4 = _density_masked(tap_mask, 4)
+    # v11.8c: tap参与的击打密度hold也参与 (hold开始点=击打事件)
+    t4 = _density_masked(tap_mask | hold_mask, 4)
     features['peak_tap_density_4beat'] = float(np.max(t4)) if t4.size > 0 else 0
     features['mean_tap_density_4beat'] = float(np.mean(t4)) if t4.size > 0 else 0
 
@@ -495,7 +496,7 @@ def extract_features(chart_data, speed=1.0):
 
     # ====== Tap-only微窗口爆发（不用Drag/Flick充数） ======
     for mw in [0.0625, 0.125, 0.25]:
-        d_tap = _density_masked(tap_mask, mw)
+        d_tap = _density_masked(tap_mask | hold_mask, mw)   # v11.8c: 含hold
         if d_tap.size > 0:
             sd = np.sort(d_tap)[::-1]
             features[f'tap_micro_max_{mw}beat'] = float(sd[0])
@@ -536,7 +537,7 @@ def extract_features(chart_data, speed=1.0):
         features['sustained_density_run_ratio'] = runs / max(len(d1) / 4, 1)
 
     # ====== 手速指数 ======
-    tap_d1 = _density_masked(tap_mask, 1)
+    tap_d1 = _density_masked(tap_mask | hold_mask, 1)   # v11.8c: 含hold
     if tap_d1.size > 2:
         td_mean = float(np.mean(tap_d1))
         td_max = float(np.max(tap_d1))
@@ -547,7 +548,7 @@ def extract_features(chart_data, speed=1.0):
         p95 = float(np.percentile(tap_d1, 95))
         features['extreme_tap_window_ratio'] = float(np.sum(tap_d1 >= p95) / max(len(tap_d1), 1))
 
-    tap_d05 = _density_masked(tap_mask, 0.5)
+    tap_d05 = _density_masked(tap_mask | hold_mask, 0.5)   # v11.8c: 含hold
     if tap_d05.size > 0:
         sd05 = np.sort(tap_d05)[::-1]
         top5_n = max(5, len(tap_d05) // 20)
@@ -625,7 +626,8 @@ def extract_features(chart_data, speed=1.0):
     # FIX(2026-08-13): 原 gaps<=4(4ticks≈0.125拍) 阈值过严, 238BPM交互的相邻音符间隔63ms被全过滤
     # → Verrückt 大位移交互的 movement_per_second 几乎为0。改为秒级阈值(0.5s), 用相邻音符平均BPM换算。
     # FIX: cross_hand 原用 ticks 当秒(<0.25永远不成立) → 用真实秒间隔。
-    active_mask = tap_mask | flick_mask
+    # v11.8c: 位移含hold长条 (hold开始点参与位移/跨线/换手; 用户实测Feeling Blue全hold位移1375被完全忽略)
+    active_mask = tap_mask | flick_mask | hold_mask
     active_idx = np.where(active_mask)[0]
     active_t = times[active_mask]
     active_pos = positions[active_mask]
@@ -1246,7 +1248,7 @@ def extract_features(chart_data, speed=1.0):
         features.update({'jack_event_count': 0, 'jack_total_steps': 0, 'jack_density': 0})
 
     # ====== 左右分布 ======
-    act_mask = tap_mask | flick_mask
+    act_mask = tap_mask | flick_mask | hold_mask   # v11.8c: 含hold
     act_pos = positions[act_mask]
     if np.sum(act_mask) > 3:
         n_act = int(np.sum(act_mask))
@@ -1434,8 +1436,8 @@ def extract_features(chart_data, speed=1.0):
     # 区分: 拍拍谱(多指和弦交替, 单指负载低) vs 交互谱(单点交替, 单指负载高)
     # 将位置离散化为6个"手指"通道, 滑动窗口统计各通道密度
     if n_notes > 10:
-        tap_only = times[tap_mask]
-        tap_pos = positions[tap_mask]
+        tap_only = times[tap_mask | hold_mask]   # v11.8c: 含hold
+        tap_pos = positions[tap_mask | hold_mask]
         if len(tap_only) > 5:
             bucket_edges = np.array([-4.5, -3.0, -1.5, 0, 1.5, 3.0, 4.5])
             finger_idx = np.clip(np.digitize(tap_pos, bucket_edges) - 1, 0, 5)

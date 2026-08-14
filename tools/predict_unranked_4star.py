@@ -113,6 +113,10 @@ def predict(feats_raw, level='IN'):
         r5 = feats_raw.get('tracks_5plus_sec', 0) / act
         r6 = feats_raw.get('tracks_6plus_sec', 0) / act
         pred += 0.15 * min(r4, 0.8) + 0.55 * min(r5, 0.4) + 1.0 * min(r6, 0.15)
+    hr = feats_raw.get('hold_count', 0) / max(feats_raw.get('total_notes', 1), 1)
+    if hr >= 0.6: pred += 0.7
+    elif hr >= 0.4: pred += 0.5
+    elif hr >= 0.25: pred += 0.3
     for lo, hi, adj in [(14,15,0.51),(15,16,0.36),(16,17,0.16)]:
         if lo < pred <= hi: pred -= adj; break
     return pred, p_gb, total
