@@ -36,10 +36,13 @@ TAG_DIM = [('底力', 'above_avg_density_mean'), ('多押', 'weighted_mf_score_p
            ('变速', 'tempo_change_log_density'), ('耐力', 'above_avg_duration_sec'),
            ('高BPM', 'bpm'), ('纵连', 'jack_density'), ('叠键', 'chord_jack_3plus_pairs'),
            ('位移', 'movement_per_second')]
+_HIGH_TAGS_SET = {'叠键', '多押', '变速', '位移'}
 def _stack_scale_for(feats):
-    n = sum(1 for _, fk in TAG_DIM if feats.get(fk, 0) >= TAG_TH.get(_, 1e9))
-    if feats.get('tracks_6plus_sec', 0) / max(feats.get('tracks_active_sec', 1), 0.01) >= TAG_TH.get('定轨', 1): n += 1
-    return 0.95 if n >= 4 else 1.0
+    ts = set()
+    for name, fk in TAG_DIM:
+        if feats.get(fk, 0) >= TAG_TH.get(name, 1e9): ts.add(name)
+    if feats.get('tracks_6plus_sec', 0) / max(feats.get('tracks_active_sec', 1), 0.01) >= TAG_TH.get('定轨', 1): ts.add('定轨')
+    return 0.92 if len(ts & _HIGH_TAGS_SET) >= 2 else 1.0
 
 def predict(feats_raw, level='IN'):
     feats = dict(feats_raw)

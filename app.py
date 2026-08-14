@@ -19,7 +19,7 @@ FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
 LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.8 (Level-Aware GB + Boost + 堆料降权 + 校准0.51/0.36/0.16) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.8b (Level-Aware GB + Boost + 精细降权high2 + 校准0.51/0.36/0.16) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
 _TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
@@ -189,8 +189,9 @@ def compute_boost(feats, speed=1.0, is_custom=False):
     # v11.3: 档位判定统一用feats(与改json一致); wmf堆料档平滑化(12~18线性过渡)
     mf3 = feats.get('multi_finger_3plus_events', 0)
     dens = feats.get('above_avg_density_mean', 0)
-    # v11.8: 堆料型(≥4难点标签)boost整体降权 (玩家研究: 配置堆料谱被高估0.3-0.5; 全段×0.95 ranked MAE 0.588→0.575)
-    _stack_scale = 0.95 if (is_custom and len(compute_tags(feats)) >= 4) else 1.0
+    # v11.8: 堆料型降权 v2 (精细: 仅高估标签组合 叠键/多押/变速/位移 ≥2 → ×0.92; 实验A: MAE 0.575→0.568, 避免楼梯/32分连带低估)
+    _HIGH_TAGS = {'叠键', '多押', '变速', '位移'}
+    _stack_scale = 0.92 if (is_custom and sum(1 for t in compute_tags(feats) if t in _HIGH_TAGS) >= 2) else 1.0
     if mf3 >= 30 and feats.get('multi_line_sim_events', 0) >= ML_HEAVY_TH:
         mf_scale = ML_HEAVY_MF       # 多面下落型(可馅蜜协调): 重压
         dens_scale_ml = ML_HEAVY_DENS
