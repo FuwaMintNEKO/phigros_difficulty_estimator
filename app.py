@@ -49,6 +49,17 @@ def compute_tags(feats):
         out.append('定轨')
     return out
 
+def _domain_warning(feats, pred):
+    """v11.8: 域外/标尺提示 (玩家研究结论)"""
+    warns = []
+    if feats.get('drag_ratio', 0) >= 0.9 and feats.get('drag_per_sec', 0) >= 3:
+        warns.append('纯drag滑动谱: 官谱无此类型, 预测仅供参考')
+    if pred >= 17.0:
+        warns.append('社区17+定数普遍虚高, 本预测按官谱标尺')
+    if feats.get('jline_movement_density', 0) >= 300:
+        warns.append('判定线表演密集: 玩家共识对其定价保守')
+    return warns
+
 # ===== 密度域对齐 (自制谱专属, 以官谱分布为目标) =====
 # 自制谱 IN(14-16.5) 密度特征系统性高于官谱同段 (domain gap, 含 drag 填充),
 # 对齐 = 减去 delta[feat] (自制均值-官谱均值), 让预测回到官谱尺度。
@@ -326,6 +337,7 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None):
         'cat_raws': dims.get('cat_raws', {}),
         'prediction': round(p_final, 4),
         'tags': compute_tags(feats),
+        'domain_warning': _domain_warning(feats, p_final),
         'version': VERSION,
         'total_notes': feats_display.get('total_notes', 0),
         'duration_sec': round(feats_display.get('duration_sec', 0), 1),
