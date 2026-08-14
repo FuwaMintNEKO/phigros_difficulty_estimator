@@ -16,6 +16,9 @@ models/*_predictions.csv
 *.zip
 *.json
 
+# ── 官谱数据（2.3GB，不入库） ──
+data/
+
 # ── Python缓存 ──
 __pycache__/
 *.pyc
@@ -29,3 +32,12 @@ __pycache__/
 # ── OS ──
 .DS_Store
 Thumbs.db
+
+# ── 团队状态 ──
+.agent-teams/
+
+# ── 实验日志 ──
+logs/
+
+# ── 临时导出 ──
+data/phira/v112_*.csv

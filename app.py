@@ -1,92 +1,141 @@
-import os, sys, json, pickle, io, zipfile, copy, numpy as np
+import os, sys, json, pickle, io, zipfile, copy, numpy as np, math
 from flask import Flask, request, jsonify, render_template
 
 sys.path.insert(0, os.path.dirname(__file__))
 from feature_extractor import extract_features
 from unified_parser import load_chart_from_bytes
+from boost_config import MANUAL_FLAT
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v8_3.pkl')
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_2.pkl')
+# v11.2: 方案B密度去冗余 (above_avg_density_mean改有效击打数) + 双指堆料档 + 定轨段
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
 gb = m['gb']; scaler = m['scaler']
 FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
-BOOST_BINS = m.get('boost_bin_stats', {})  # 分档统计
+LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
+MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
+CAPS = m.get('caps', {})  # boost excess 封顶
+VERSION = f'11.2 (Level-Aware GB + Boost + 密度去冗余 + 条件缩放 + 校准) 全{ m.get("n_train", "?") }官谱'
 
-# 从 pickle 加载 FLAT_FEATURES（与训练脚本自动同步）
-FLAT_FEATURES = m.get('FLAT_FEATURES', [])
-DC = m.get('dynamic_cap', {'knee': 2.5, 'power': 0.9})
+# ===== 密度域对齐 (自制谱专属, 以官谱分布为目标) =====
+# 自制谱 IN(14-16.5) 密度特征系统性高于官谱同段 (domain gap, 含 drag 填充),
+# 对齐 = 减去 delta[feat] (自制均值-官谱均值), 让预测回到官谱尺度。
+# 数据: data/domain_align.json (70 个密度类特征), 由 tools/_tmp_gen_align.py 生成。
+_ALIGN_PATH = os.path.join(os.path.dirname(__file__), 'data', 'domain_align.json')
+try:
+    with open(_ALIGN_PATH, encoding='utf-8') as _f:
+        _ALIGN = json.load(_f)
+    DOMAIN_DELTA = _ALIGN.get('delta', {})
+except Exception:
+    DOMAIN_DELTA = {}
 
-import math
+def is_custom_chart(chart_data, raw_text=None):
+    """判定输入是否为自制谱 (RPE/PE), 官谱 standard 格式返回 False"""
+    if raw_text is not None:
+        return True  # PE 文本格式
+    if isinstance(chart_data, dict):
+        meta = chart_data.get('META') or {}
+        if meta.get('RPEVersion') is not None:
+            return True  # RPE (PhiEdit) 导出
+    return False
 
-# v8.2: 移除峰值密度boost, target=0.28, power=0.75, thresh=0.22
-RATIO_THRESHOLD = 0.22
-RATIO_TARGET = 0.28
-RATIO_POWER = 0.75
-RATIO_STEEPNESS = 25
+def apply_domain_align(feats, is_custom, level):
+    """自制谱 IN 段: 密度特征向官谱分布对齐 (只减 delta, 不依赖社区定数)"""
+    if not is_custom or not DOMAIN_DELTA:
+        return feats
+    if (level or 'IN').upper() != 'IN':
+        return feats  # AT 段 density gap≈0/反向, 模型已低估, 不对齐
+    for k, d in DOMAIN_DELTA.items():
+        if k in feats:
+            feats[k] = feats[k] - d
+    return feats
 
-def adjust_boost_smooth(boost, gb):
-    """Sigmoid平滑条件性调整：ratio<th不动，ratio>th逐渐施加凸性压缩。boost<2不压缩（简单谱需要boost补偿低GB）"""
-    if boost < 2.0:
-        return boost
-    ratio = boost / gb if gb > 0 else 0
-    expected = RATIO_TARGET * gb
-    if expected <= 0 or boost <= 0:
-        return boost
-    adj = expected * ((boost / expected) ** RATIO_POWER)
-    w = 1 / (1 + math.exp(-RATIO_STEEPNESS * (ratio - RATIO_THRESHOLD)))
-    return (1 - w) * boost + w * adj
+# v11 条件boost参数: 多指谱(mf3>=30)压mf类特征, 双指谱(mf3<=5)抬eff有效单指密度
+# 依据: 上架谱16+段诊断 — 多指谱被推高(社区虚高应压低), 双指谱被压低(社区偏低应抬高)
+MF_FEATS_COND = {'weighted_mf_score_per_sec', 'multi_finger_3plus_events', 'discrete_mf_ratio', 'chord_alternation_rate'}
+EFF_FEATS_COND = {'eff_peak_tps_1s', 'eff_avg_tps_1s'}
+DENS_FEATS_COND = {'above_avg_density_mean', 'real_core_notes_per_second'}
+MF3_SCALE_GE30 = 0.50   # 低密度多指谱(堆料型): mf特征系数 (压制OOD外推虚高)
+MF3_SCALE_HIDENS = 0.70 # 高密度多指谱(真材实料): 少压
+MF3_HIDENS_TH = 9.5     # 新尺度(方案B去冗余)官谱16+段dens P50
+MF3_SCALE_MID = 0.80    # 混合
+EFF_SCALE_LE5 = 1.50    # 双指耐力型谱: eff特征系数 (抬升)
+EFF_SCALE_DF_STACK = 1.00  # 双指堆料型谱: 不抬eff (t1: 高估Top20中18/20为双指堆料)
+DF_STACK_WMF_TH = 15.0   # 双指堆料判定: weighted_mf_per_sec>=15 (双押宽押堆料, Breakcore 19.2 vs BonusTime 9.8)
+DF_WMF_SCALE = 0.60      # 双指堆料型: weighted_mf降权 (双押交互不算多指协调)
+ML_HEAVY_TH = 100        # 多面下落型多指: multi_line_sim_events>=100 (可馅蜜协调, 非真多押)
+ML_HEAVY_MF = 0.45       # 多面型: mf特征系数 (重压)
+ML_HEAVY_DENS = 0.85     # 多面型: 密度特征系数
+_CALIB_TABLE = [(14, 15, 0.30), (15, 16, 0.18), (16, 17, 0.05)]  # 预测时校准(仅自制谱, 按预测值段)
 
-def _dynamic_cap(raw):
-    """指数衰减cap：线性到knee，超出部分 ^power 加上去，无硬上限"""
-    KNEE = DC['knee']; POWER = DC['power']
-    if raw <= KNEE:
-        return raw
-    excess = raw - KNEE
-    return KNEE + excess ** POWER
-
-
-def compute_boost(feats, speed=1.0):
-    """6大类别boost计算。excess指数随speed线性增加(1x=0.70, 2x=0.85)"""
-    excess_exp = 0.70 + 0.15 * (speed - 1.0)
+def compute_boost(feats, speed=1.0, is_custom=False):
+    """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)
+    v11: 条件缩放(仅自制谱) — 多指谱压mf特征, 双指谱抬eff特征; 官谱保持原始权重"""
     CATEGORIES = {
-        '密度': ['density_dimension', 'fast_note_density_16th', 'real_core_notes_per_second'],
-        '平均位移': ['movement_per_second', 'burst_avg_movement', 'wide_jump_density', 'sim_pos_spread_max'],
-        '配置': ['stair_density', 'stair_speed_avg', 'stair_complexity', 'stair_chord_ratio', 'trill_density', 'jack_density', 'chord_size_entropy', 'sim_pos_spread_mean', 'multi_finger_3plus_events', 'weighted_mf_score_per_sec', 'discrete_mf_ratio', 'chord_alternation_rate', 'position_cluster_count', 'track_deviation_score', 'position_entropy', 'position_range_used', 'pattern_switch_rate', 'direction_irregularity', 'hold_interference_index', 'drag_flick_ratio'],
-        '耐力': ['stamina_ratio', 'tap_per_second', 'total_notes', 'tap_count', 'duration_sec', 'rest_ratio', 'global_jack_count', 'burst_intensity_mean', 'tap_burst_top5'],
-        '读谱': ['density_transition_mean', 'density_transition_std', 'tempo_change_count', 'offbeat_ratio', 'rhythm_entropy', 'type_switch_per_sec', 'note_clutter_ratio'],
+        '密度': ['real_core_notes_per_second', 'above_avg_density_mean'],
+        '配置': ['stair_density', 'stair_speed_avg', 'stair_complexity', 'stair_chord_ratio', 'chord_size_entropy', 'chord_alternation_rate', 'weighted_mf_score_per_sec', 'discrete_mf_ratio', 'position_entropy', 'avg_chord_size_poly', 'position_range_used', 'trill_density', 'multi_finger_3plus_events', 'pattern_switch_rate', 'direction_irregularity', 'drag_flick_ratio'],
+        '耐力': ['above_avg_duration_sec'],
+        '读谱': ['tempo_change_count', 'type_switch_per_sec', 'density_transition_std', 'density_transition_mean', 'note_clutter_ratio', 'rhythm_entropy', 'hold_interference_index', 'jline_movement_density', 'jline_rotate_density', 'jline_disappear_density', 'speed_volatility', 'above_below_cross'],
     }
-    # excess指数: 1x=0.70, 速度↑→指数↑→boost响应更线性
     excess_exp = 0.70 + 0.15 * (speed - 1.0)
-    # 每个类别的主要可读特征（用于显示原始值）
     CAT_RAW_KEY = {
-        '密度': ('density_dimension', '(=√(TPS×高潮段均值))'),
-        '平均位移': ('movement_per_second', '格/秒'),
-        '配置': ('pattern_switch_rate', '切换/秒'),
-        '耐力': ('tap_per_second', '键/秒'),
-        '读谱': ('density_transition_mean', ''),
+        '密度': ('above_avg_density_mean', '高潮段真实TPS'),
+        '配置': ('stair_speed_avg', '楼梯速度/秒'),
+        '耐力': ('above_avg_duration_sec', '高潮段总秒数'),
+        '读谱': ('jline_movement_density', '判定线移动/秒'),
     }
     total = 0.0
     contribs = []
     cat_scores = {}
     cat_raws = {}
-    for fname, bl, co in FLAT_FEATURES:
+    cap_default = CAPS.get('_default', None)
+    # v11: mf3条件缩放系数 (仅自制谱; 多指谱按密度分级; v11.2加多面型重压)
+    mf3 = feats.get('multi_finger_3plus_events', 0)
+    dens = feats.get('above_avg_density_mean', 0)
+    if mf3 >= 30 and feats.get('multi_line_sim_events', 0) >= ML_HEAVY_TH:
+        mf_scale = ML_HEAVY_MF       # 多面下落型(可馅蜜协调): 重压
+        dens_scale_ml = ML_HEAVY_DENS
+    elif mf3 >= 30:
+        mf_scale = MF3_SCALE_HIDENS if dens >= MF3_HIDENS_TH else MF3_SCALE_GE30
+        dens_scale_ml = 1.0
+    else:
+        mf_scale = 1.0 if mf3 <= 5 else MF3_SCALE_MID
+    # v11.2: 双指谱按wmf分档 — 堆料型(双押宽押堆料)不抬eff且wmf降权, 耐力型保持抬升
+    df_stack = (mf3 <= 5 and feats.get('weighted_mf_score_per_sec', 0) >= DF_STACK_WMF_TH)
+    eff_scale = 1.0 if mf3 >= 30 else (EFF_SCALE_DF_STACK if df_stack else (EFF_SCALE_LE5 if mf3 <= 5 else 1.0))
+    wmf_scale = DF_WMF_SCALE if df_stack else 1.0
+    for fname, bl, co in MANUAL_FLAT:
         v = feats.get(fname, 0)
         pv = P95.get(fname, 0)
         t = max(pv * 0.55, bl * 0.5)
         if v <= t:
             continue
         e = v / t - 1.0
+        c = CAPS.get(fname, cap_default)
+        if c is not None and e > c:
+            e = c
+        if is_custom:
+            if fname in MF_FEATS_COND:
+                co = co * mf_scale
+            elif fname in EFF_FEATS_COND:
+                co = co * eff_scale
+            if fname in DENS_FEATS_COND and mf3 >= 30 and feats.get('multi_line_sim_events', 0) >= ML_HEAVY_TH:
+                co = co * dens_scale_ml
+            if fname == 'weighted_mf_score_per_sec':
+                co = co * wmf_scale
         x = co * (e ** excess_exp)
         if v > max(P99.get(fname, 0), bl * 0.5):
             pe = v / max(P99.get(fname, 0), bl * 0.5) - 1.0
+            if c is not None and pe > c:
+                pe = c
             x += co * max(0, pe) ** excess_exp * 0.5
         total += x
         contribs.append((fname, round(x, 4), round(v, 2), round(t, 2), round(v/t, 3)))
-    boost = _dynamic_cap(total)
+    boost = total
     # 按类别汇总
     for cat_name, feat_names in CATEGORIES.items():
         cat_sum = sum(c[1] for c in contribs if c[0] in feat_names)
@@ -143,31 +192,60 @@ def apply_speed_multiplier(chart_data, speed):
 
 
 # ====== 单谱预测 ======
-def predict_one_chart(chart_data, speed=1.0):
-    """变速预测：GB始终用1x特征，boost用变速特征"""
-    # GB: 始终用 1x 特征（GB只在训练分布内有效）
+def _level_onehot(level):
+    """level -> one-hot (EZ/HD/IN/AT)
+    若模型为 IN_AT 合并(3类)则 IN/AT 都映射到 IN_AT"""
+    lv = (level or 'IN').upper()
+    if 'IN_AT' in LV_ORDER and lv in ('IN', 'AT'):
+        lv = 'IN_AT'
+    if lv not in LV_ORDER:
+        lv = 'IN_AT' if 'IN_AT' in LV_ORDER else 'IN'
+    vec = [0.0] * len(LV_ORDER)
+    vec[LV_ORDER.index(lv)] = 1.0
+    return vec
+
+def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None):
+    """v10.0: GB残差(含level特征) + 纯Boost叠加 = 最终定数
+    is_custom: True=自制谱(应用密度域对齐), None=自动判定"""
+    if is_custom is None:
+        is_custom = is_custom_chart(chart_data)
     feats_1x = extract_features(chart_data, speed=1.0)
     if not feats_1x:
         return None, '特征提取失败'
-    x = np.array([[feats_1x.get(n, 0) for n in FN]])
+    if is_custom:
+        feats_1x = apply_domain_align(feats_1x, True, level)
+    
+    x = np.array([[feats_1x.get(n, 0) for n in FN] + _level_onehot(level)])
     xs = scaler.transform(x)
-    p_gb = float(gb.predict(xs)[0])
+    p_gb_residual = float(gb.predict(xs)[0])
 
-    # Boost: 变速特征
     if speed != 1.0:
         chart_data_scaled = apply_speed_multiplier(chart_data, speed)
         feats_boost = extract_features(chart_data_scaled, speed=speed)
     else:
-        feats_boost = extract_features(chart_data, speed=1.0)
+        feats_boost = feats_1x
 
     if not feats_boost:
         return None, '特征提取失败'
+    if is_custom:
+        feats_boost = apply_domain_align(feats_boost, True, level)
 
-    p_b, dims, key_contribs = compute_boost(feats_boost, speed=speed)
-    p_b_adj = adjust_boost_smooth(p_b, p_gb)
-    p_f = p_gb + p_b_adj
+    p_boost, dims, key_contribs = compute_boost(feats_boost, speed=speed, is_custom=is_custom)
+    p_final = p_gb_residual + p_boost
+    if is_custom:
+        # v11.1: 定轨键盘段加成 (4k/5k/6k: 固定槽位密集击打, 多指分工双指无解; 占比归一化防长谱误伤)
+        _act = feats_1x.get('tracks_active_sec', 0)
+        if _act > 0:
+            _r4 = feats_1x.get('tracks_4plus_sec', 0) / _act
+            _r5 = feats_1x.get('tracks_5plus_sec', 0) / _act
+            _r6 = feats_1x.get('tracks_6plus_sec', 0) / _act
+            p_final += 0.15 * min(_r4, 0.8) + 0.55 * min(_r5, 0.4) + 1.0 * min(_r6, 0.15)
+        # v11: 预测时校准 (仅自制谱: 修正社区谱口径 vs 官谱标尺的14-16段OOD高估)
+        for _lo, _hi, _adj in _CALIB_TABLE:
+            if _lo < p_final <= _hi:
+                p_final = p_final - _adj
+                break
 
-    # 显示用的特征值：用变速的（前端看实时数据）
     feats_display = feats_boost if speed != 1.0 else feats_1x
 
     meta = {}
@@ -190,14 +268,17 @@ def predict_one_chart(chart_data, speed=1.0):
         'composer': composer,
         'charter': charter,
         'level_tag': level_tag,
+        'level_used': (level or 'IN').upper() if (level or 'IN').upper() in LV_ORDER else 'IN',
         'format': 'RPE' if is_rpe else 'Standard',
-        'gb': round(p_gb, 4),
-        'boost': round(p_b, 4),
-        'boost_adj': round(p_b_adj, 4),
-        'boost_ratio': round(p_b / p_gb, 4) if p_gb > 0 else 0,
+        'gb': round(p_gb_residual, 4),
+        'boost': round(p_boost, 4),
+        'boost_adj': round(p_boost, 4),
+        'bias': 0,
+        'boost_ratio': round(p_boost / p_final, 4) if p_final > 0 else 0,
         'categories': dims.get('categories', {}),
         'cat_raws': dims.get('cat_raws', {}),
-        'prediction': round(p_f, 4),
+        'prediction': round(p_final, 4),
+        'version': VERSION,
         'total_notes': feats_display.get('total_notes', 0),
         'duration_sec': round(feats_display.get('duration_sec', 0), 1),
         'bpm': feats_display.get('bpm', 0),
@@ -236,14 +317,17 @@ def index():
 
 @app.route('/predict_one', methods=['POST'])
 def predict_one():
-    """接收单个 JSON body（原始谱面格式），返回单个预测结果（供 Android Overlay 使用）"""
+    """接收单个 JSON body（原始谱面格式），返回单个预测结果（供 Android Overlay 使用）
+    level 通过 query 参数 ?level=EZ|HD|IN|AT 传入"""
     try:
         raw_bytes = request.get_data()
-        chart_data, _ = load_chart_from_bytes(raw_bytes)
+        chart_data, raw_text = load_chart_from_bytes(raw_bytes)
         if chart_data is None:
             return jsonify({'error': '无法解析谱面格式'}), 400
 
-        result, err = predict_one_chart(chart_data)
+        level = request.args.get('level', 'IN')
+        result, err = predict_one_chart(chart_data, level=level,
+                                        is_custom=is_custom_chart(chart_data, raw_text))
         if result:
             result['source_file'] = 'overlay'
             result['chart_name'] = 'overlay'
@@ -270,6 +354,10 @@ def predict():
         speed = max(0.5, min(2.0, speed))  # 限制范围 0.5~2.0
     except (ValueError, TypeError):
         speed = 1.0
+    # 读取 level 参数 (EZ/HD/IN/AT)
+    level = request.form.get('level', 'IN')
+    if level.upper() not in LV_ORDER:
+        level = 'IN'
 
     results = []
     errors = []
@@ -302,7 +390,8 @@ def predict():
                         if not internal_name and raw_text:
                             internal_name = extract_pe_name(raw_text)
                         chart_name = format_chart_name(name, internal_name)
-                        result, err = predict_one_chart(chart_data, speed)
+                        result, err = predict_one_chart(chart_data, speed, level,
+                                                        is_custom=is_custom_chart(chart_data, raw_text))
                         if result:
                             result['source_file'] = f.filename
                             result['chart_name'] = chart_name
@@ -326,7 +415,8 @@ def predict():
                 if not internal_name and raw_text:
                     internal_name = extract_pe_name(raw_text)
                 chart_name = format_chart_name(f.filename, internal_name)
-                result, err = predict_one_chart(chart_data, speed)
+                result, err = predict_one_chart(chart_data, speed, level,
+                                                is_custom=is_custom_chart(chart_data, raw_text))
                 if result:
                     result['source_file'] = f.filename
                     result['chart_name'] = chart_name

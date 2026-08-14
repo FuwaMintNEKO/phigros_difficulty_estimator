@@ -1,0 +1,380 @@
+import os, sys
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+import os, sys, json, pickle, io, zipfile, copy, numpy as np, math
+from flask import Flask, request, jsonify, render_template
+
+sys.path.insert(0, os.path.dirname(__file__))
+from feature_extractor import extract_features
+from unified_parser import load_chart_from_bytes
+
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v7.pkl')
+
+with open(MODEL_PATH, 'rb') as f:
+    m = pickle.load(f)
+gb = m['gb']; scaler = m['scaler']
+FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
+VERSION = '8.6 (GB+Boost+Bias) 低定数修正+排序'
+MODEL_TYPE = m.get('model_type', 'gb')  # 'gb'=GB+Boost混合, 'xgboost'=纯XGBoost
+
+# 从 pickle 加载 FLAT_FEATURES（与训练脚本自动同步）
+FLAT_FEATURES = m.get('FLAT_FEATURES', [])
+DC = m.get('dynamic_cap', {'knee': 1.0, 'power': 0.90})
+
+# 从模型加载 sigmoid 参数，否则使用默认值 (v7无sigmoid_params，使用v7验证过的参数)
+SP = m.get('sigmoid_params', {})
+RATIO_THRESHOLD = SP.get('thresh', 0.24)
+RATIO_TARGET = SP.get('target', 0.40)
+RATIO_POWER = SP.get('power', 0.80)
+RATIO_STEEPNESS = 25
+
+# GB偏低补偿：GB模型在低定数谱面上系统性偏低，用线性bias补偿
+BP = m.get('bias_params', {})
+BIAS_THRESHOLD = BP.get('threshold', 14.0)
+BIAS_FACTOR = BP.get('factor', 0.25)
+
+def adjust_boost_smooth(boost, gb):
+    """Sigmoid平滑条件性调整：ratio<th不动，ratio>th逐渐施加凸性压缩。boost<2不压缩（简单谱需要boost补偿低GB）"""
+    if boost < 2.0:
+        return boost
+    ratio = boost / gb if gb > 0 else 0
+    expected = RATIO_TARGET * gb
+    if expected <= 0 or boost <= 0:
+        return boost
+    adj = expected * ((boost / expected) ** RATIO_POWER)
+    w = 1 / (1 + math.exp(-RATIO_STEEPNESS * (ratio - RATIO_THRESHOLD)))
+    return (1 - w) * boost + w * adj
+
+def compute_gb_bias(gb):
+    """GB模型在低定数谱面上系统性偏低，线性补偿：bias = max(0, THRESHOLD - GB) * FACTOR"""
+    return max(0, BIAS_THRESHOLD - gb) * BIAS_FACTOR
+
+def _dynamic_cap(raw):
+    """指数衰减cap：线性到knee，超出部分 ^power 加上去，无硬上限"""
+    KNEE = DC['knee']; POWER = DC['power']
+    if raw <= KNEE:
+        return raw
+    excess = raw - KNEE
+    return KNEE + excess ** POWER
+
+
+def compute_boost(feats, speed=1.0):
+    """6大类别boost计算。excess指数随speed线性增加(1x=0.70, 2x=0.85)"""
+    excess_exp = 0.70 + 0.15 * (speed - 1.0)
+    CATEGORIES = {
+        '密度': ['density_dimension', 'real_core_notes_per_second'],
+        '配置': ['stair_density', 'stair_speed_avg', 'stair_complexity', 'stair_chord_ratio', 'chord_size_entropy', 'chord_alternation_rate', 'weighted_mf_score_per_sec', 'discrete_mf_ratio', 'position_entropy', 'avg_chord_size_poly', 'position_range_used', 'trill_density', 'multi_finger_3plus_events', 'pattern_switch_rate', 'direction_irregularity', 'drag_flick_ratio'],
+        '耐力': ['above_avg_density_mean', 'above_avg_duration_sec', 'above_avg_density_ratio', 'rest_ratio', 'tap_burst_top5'],
+        '读谱': ['tempo_change_count', 'type_switch_per_sec', 'density_transition_std', 'density_transition_mean', 'note_clutter_ratio', 'rhythm_entropy', 'hold_interference_index', 'jline_movement_density', 'jline_rotate_density', 'jline_disappear_density', 'speed_volatility', 'above_below_cross'],
+        '高速': ['fast_note_density_16th', 'fast_note_density_32nd', 'fast_note_density_24th', 'fast_note_density_48th', 'fast_note_density_64th', 'rhythm_type_count'],
+    }
+    # excess指数: 1x=0.70, 速度↑→指数↑→boost响应更线性
+    excess_exp = 0.70 + 0.15 * (speed - 1.0)
+    # 每个类别的主要可读特征（用于显示原始值）
+    CAT_RAW_KEY = {
+        '密度': ('density_dimension', '(=√(TPS×高潮段均值))'),
+        '配置': ('stair_rate_per_sec', '楼梯/秒'),
+        '耐力': ('above_avg_density_mean', '高潮TPS'),
+        '读谱': ('jline_movement_density', '判定线动/秒'),
+        '高速': ('fast_note_density_16th', '16分密度'),
+    }
+    total = 0.0
+    contribs = []
+    cat_scores = {}
+    cat_raws = {}
+    for fname, bl, co in FLAT_FEATURES:
+        v = feats.get(fname, 0)
+        pv = P95.get(fname, 0)
+        t = max(pv * 0.55, bl * 0.5)
+        if v <= t:
+            continue
+        e = v / t - 1.0
+        x = co * (e ** excess_exp)
+        if v > max(P99.get(fname, 0), bl * 0.5):
+            pe = v / max(P99.get(fname, 0), bl * 0.5) - 1.0
+            x += co * max(0, pe) ** excess_exp * 0.5
+        total += x
+        contribs.append((fname, round(x, 4), round(v, 2), round(t, 2), round(v/t, 3)))
+    boost = _dynamic_cap(total)
+    # 按类别汇总
+    for cat_name, feat_names in CATEGORIES.items():
+        cat_sum = sum(c[1] for c in contribs if c[0] in feat_names)
+        if cat_sum > 0:
+            cat_scores[cat_name] = round(cat_sum, 4)
+        # 代表性原始值
+        raw_key, unit = CAT_RAW_KEY.get(cat_name, (None, ''))
+        if raw_key:
+            raw_val = feats.get(raw_key, 0)
+            cat_raws[cat_name] = {'value': round(raw_val, 2), 'unit': unit}
+    contribs.sort(key=lambda x: -x[1])
+    return boost, {'boost': round(boost, 4), 'categories': cat_scores, 'cat_raws': cat_raws}, contribs[:15]
+
+
+# ====== 统一显示名称: 文件名 (内部名称) ======
+def format_chart_name(filename, internal_name):
+    """统一显示为 文件名 (内部名称)，若内部名称为空则只显示文件名"""
+    if internal_name and internal_name != filename:
+        # 去掉文件扩展名，简约一点
+        base = filename.rsplit('.', 1)[0] if '.' in filename else filename
+        if internal_name.lower() != base.lower():
+            return f"{base} ({internal_name})"
+    return filename
+
+
+# ====== PE格式: 提取谱面名称 ======
+def extract_pe_name(text):
+    """从PE文本开头提取 # name: / # title: 等元信息"""
+    lines = text.strip().split('\n')
+    for raw in lines[:30]:
+        raw = raw.strip()
+        if raw.startswith('#'):
+            content = raw[1:].strip()
+            if content.lower().startswith('name:') or content.lower().startswith('title:'):
+                return content.split(':', 1)[1].strip()
+    return ''
+
+
+# ====== 倍速功能: 缩放 BPM ======
+def apply_speed_multiplier(chart_data, speed):
+    """深拷贝谱面数据，将所有BPM乘以speed倍率"""
+    if speed == 1.0:
+        return chart_data
+    data = copy.deepcopy(chart_data)
+    # 缩放每条判定线的bpm
+    for jl in data.get('judgeLineList', []):
+        if 'bpm' in jl:
+            jl['bpm'] = jl['bpm'] * speed
+    # 缩放 BPMList
+    for entry in data.get('BPMList', []):
+        if 'bpm' in entry:
+            entry['bpm'] = entry['bpm'] * speed
+    return data
+
+
+# ====== 单谱预测 ======
+def predict_one_chart(chart_data, speed=1.0):
+    """v8.13: XGBoost直接预测难度 (GB已在v8.9被证明Boost无用)"""
+    feats_1x = extract_features(chart_data, speed=1.0)
+    if not feats_1x:
+        return None, '特征提取失败'
+    
+    # 构建特征向量 (直接用FN，不包含boost)
+    x = np.array([[feats_1x.get(n, 0) for n in FN]])
+    if MODEL_TYPE == 'xgboost':
+        p_final = float(gb.predict(x)[0])  # XGBoost直接预测定数
+        p_gb_display = p_final
+    else:
+        # v8.5: GB预测残差，最终 = GB + Boost
+        xs = scaler.transform(x)
+        p_gb_residual = float(gb.predict(xs)[0])  # GB残差预测
+        p_gb_display = p_gb_residual
+
+    # Boost 详细信息 (用于显示)
+    if speed != 1.0:
+        chart_data_scaled = apply_speed_multiplier(chart_data, speed)
+        feats_boost = extract_features(chart_data_scaled, speed=speed)
+    else:
+        feats_boost = feats_1x
+
+    if not feats_boost:
+        return None, '特征提取失败'
+
+    p_b, dims, key_contribs = compute_boost(feats_boost, speed=speed)
+
+    # 最终预测
+    if MODEL_TYPE == 'xgboost':
+        # v8.13: 纯XGBoost直接预测
+        p_boost_adj = p_b
+    else:
+        # v8.6: GB预测残差 + Boost调整 + GB偏低补偿 = 最终预测
+        p_boost_adj = adjust_boost_smooth(p_b, p_gb_residual) if p_gb_residual > 0 else p_b
+        p_bias = compute_gb_bias(p_gb_residual)
+        p_final = p_gb_residual + p_boost_adj + p_bias
+
+    # 显示用的特征值：用变速的（前端看实时数据）
+    feats_display = feats_boost if speed != 1.0 else feats_1x
+
+    meta = {}
+    if 'META' in chart_data:
+        meta = chart_data.get('META', {})
+        if 'RPEVersion' in meta:
+            is_rpe = True
+        else:
+            is_rpe = False
+    else:
+        is_rpe = False
+
+    song_name = meta.get('name', '') or ''
+    composer = meta.get('composer', '') or ''
+    charter = meta.get('charter', '') or ''
+    level_tag = meta.get('level', '') or ''
+
+    return {
+        'song_name': song_name,
+        'composer': composer,
+        'charter': charter,
+        'level_tag': level_tag,
+        'format': 'RPE' if is_rpe else 'Standard',
+        'gb': round(p_gb_display, 4),
+        'boost': round(p_b, 4),
+        'boost_adj': round(p_boost_adj, 4),
+        'bias': round(p_bias if MODEL_TYPE != 'xgboost' else 0, 4),
+        'boost_ratio': round(p_b / p_final, 4) if p_final > 0 else 0,
+        'categories': dims.get('categories', {}),
+        'cat_raws': dims.get('cat_raws', {}),
+        'prediction': round(p_final, 4),
+        'version': VERSION,
+        'total_notes': feats_display.get('total_notes', 0),
+        'duration_sec': round(feats_display.get('duration_sec', 0), 1),
+        'bpm': feats_display.get('bpm', 0),
+        'bpm_min': feats_display.get('bpm_min', 0),
+        'bpm_max': feats_display.get('bpm_max', 0),
+        'bpm_change_count': feats_display.get('bpm_change_count', 0),
+        'notes_per_second': round(feats_display.get('notes_per_second', 0), 2),
+        'real_notes_per_second': round(feats_display.get('real_notes_per_second', 0), 2),
+        'core_notes_per_second': round(feats_display.get('core_notes_per_second', 0), 2),
+        'real_core_notes_per_second': round(feats_display.get('real_core_notes_per_second', 0), 2),
+        'tap_per_second': round(feats_display.get('tap_per_second', 0), 2),
+        'rest_duration_sec': round(feats_display.get('duration_sec', 0) - feats_display.get('real_active_sec', 0), 1),
+        'rest_ratio': round((feats_display.get('duration_sec', 0) - feats_display.get('real_active_sec', 0)) / max(feats_display.get('duration_sec', 0), 0.01), 3),
+        'real_active_sec': round(feats_display.get('real_active_sec', 0), 1),
+        'above_avg_density_mean': round(feats_display.get('above_avg_density_mean', 0), 1),
+        'above_avg_density_ratio': round(feats_display.get('above_avg_density_ratio', 0), 3),
+        'jack_count': feats_display.get('global_jack_count', 0),
+        'key_features': [
+            {
+                'name': fname,
+                'contribution': round(c, 4),
+                'value': round(v, 2),
+                'threshold': round(t, 2),
+                'excess': round(v/t, 3)
+            }
+            for fname, c, v, t, _ in key_contribs
+        ],
+    }, None
+
+
+# ====== 路由 ======
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/predict_one', methods=['POST'])
+def predict_one():
+    """接收单个 JSON body（原始谱面格式），返回单个预测结果（供 Android Overlay 使用）"""
+    try:
+        raw_bytes = request.get_data()
+        chart_data, _ = load_chart_from_bytes(raw_bytes)
+        if chart_data is None:
+            return jsonify({'error': '无法解析谱面格式'}), 400
+
+        result, err = predict_one_chart(chart_data)
+        if result:
+            result['source_file'] = 'overlay'
+            result['chart_name'] = 'overlay'
+            return jsonify(result)
+        else:
+            return jsonify({'error': err}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    if 'files[]' not in request.files and 'file' not in request.files:
+        return jsonify({'error': '未上传文件'}), 400
+
+    files = request.files.getlist('files[]') or [request.files['file']]
+    # 读取用户选择的解析格式
+    force_format = request.form.get('format', 'auto')
+    if force_format == 'auto':
+        force_format = None
+    # 读取倍速参数
+    try:
+        speed = float(request.form.get('speed', '1.0'))
+        speed = max(0.5, min(2.0, speed))  # 限制范围 0.5~2.0
+    except (ValueError, TypeError):
+        speed = 1.0
+
+    results = []
+    errors = []
+
+    for f in files:
+        if not f.filename:
+            continue
+
+        try:
+            raw_bytes = f.read()
+
+            if f.filename.lower().endswith('.zip'):
+                with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+                    for name in z.namelist():
+                        if not name.endswith('.json') and '.' not in name.split('/')[-1]:
+                            continue
+                        raw = z.read(name)
+                        chart_data = None
+                        raw_text = None
+                        try:
+                            chart_data, raw_text = load_chart_from_bytes(raw, force_format)
+                        except:
+                            raw_text = raw.decode('utf-8', errors='replace')
+                        if chart_data is None:
+                            errors.append({'file': name, 'error': '无法解析格式'})
+                            continue
+                        internal_name = ''
+                        if isinstance(chart_data, dict) and 'META' in chart_data:
+                            internal_name = chart_data.get('META', {}).get('name', '')
+                        if not internal_name and raw_text:
+                            internal_name = extract_pe_name(raw_text)
+                        chart_name = format_chart_name(name, internal_name)
+                        result, err = predict_one_chart(chart_data, speed)
+                        if result:
+                            result['source_file'] = f.filename
+                            result['chart_name'] = chart_name
+                            results.append(result)
+                        else:
+                            errors.append({'file': name, 'error': err})
+
+            else:
+                chart_data = None
+                raw_text = None
+                try:
+                    chart_data, raw_text = load_chart_from_bytes(raw_bytes, force_format)
+                except:
+                    pass
+                if chart_data is None:
+                    errors.append({'file': f.filename, 'error': '无法解析谱面格式'})
+                    continue
+                internal_name = ''
+                if isinstance(chart_data, dict) and 'META' in chart_data:
+                    internal_name = chart_data.get('META', {}).get('name', '')
+                if not internal_name and raw_text:
+                    internal_name = extract_pe_name(raw_text)
+                chart_name = format_chart_name(f.filename, internal_name)
+                result, err = predict_one_chart(chart_data, speed)
+                if result:
+                    result['source_file'] = f.filename
+                    result['chart_name'] = chart_name
+                    results.append(result)
+                else:
+                    errors.append({'file': f.filename, 'error': err})
+        except Exception as e:
+            errors.append({'file': f.filename, 'error': str(e)})
+
+    results.sort(key=lambda x: -x['prediction'])
+    return jsonify({'results': results, 'errors': errors, 'count': len(results)})
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Phigros 难度预测服务器')
+    parser.add_argument('--host', default='0.0.0.0', help='监听地址')
+    parser.add_argument('--port', type=int, default=5000, help='监听端口')
+    parser.add_argument('--debug', action='store_true', help='调试模式')
+    args = parser.parse_args()
+    app.run(host=args.host, port=args.port, debug=args.debug)

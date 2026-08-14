@@ -9,6 +9,16 @@ from feature_extractor import extract_features
 RPE_TYPE_MAP = {1: 1, 2: 3, 3: 4, 4: 2}
 
 
+def _merge_speed_events(line):
+    """收集 RPE 判定线的变速事件: 顶层 speedEvents(官谱格式) + eventLayers[*].speedEvents(RPE格式)"""
+    events = list(line.get('speedEvents', []))
+    for layer in line.get('eventLayers', []) or []:
+        if layer is None:
+            continue
+        events.extend(layer.get('speedEvents', []))
+    return events
+
+
 def convert_rpe_to_standard(rpe_data):
     """将RPE格式谱面转为Phigros标准JSON格式"""
     judge_lines = rpe_data.get('judgeLineList', [])
@@ -37,13 +47,17 @@ def convert_rpe_to_standard(rpe_data):
         line['bpm'] = base_bpm
         
         for note in line.get('notes', []) if 'notes' in line else line.get('notes_display', []):
+            # RPE 假音符(isFake=1)是装饰/演出用, 实际不可玩, 必须过滤, 否则密度/物量虚高
+            if int(note.get('isFake', 0) or 0) == 1:
+                continue
             ntype = note.get('type', 0)
             if ntype not in RPE_TYPE_MAP:
                 continue
             mapped_type = RPE_TYPE_MAP[ntype]
             
-            line_id = note.get('lineId', note.get('above', 0))
-            is_above = line_id == 0 or line_id >= 0
+            # RPE above 语义: 1=正面(判定线前方), 0/2=背面 → 只有 above==1 归 notesAbove
+            # 注意新版RPE的 lineId key 存在但值为 None, 不能作为判定依据
+            is_above = note.get('above', 1) == 1
             
             st = note.get('startTime', [0, 0, 1])
             if isinstance(st, (int, float)):
@@ -70,7 +84,8 @@ def convert_rpe_to_standard(rpe_data):
 
             speed = note.get('speed', 1.0)
             position_x = note.get('positionX', note.get('x', 0))
-            position_x = float(position_x) / 100.0 if isinstance(position_x, (int, float, str)) else 0.0
+            # RPE positionX 是像素坐标(视口±675), 官方为±9 → 除以 675/9=75
+            position_x = float(position_x) / 75.0 if isinstance(position_x, (int, float, str)) else 0.0
 
             note_obj = {'type': mapped_type, 'time': start_time, 'positionX': position_x,
                         'holdTime': hold_time, 'speed': speed}
@@ -80,12 +95,18 @@ def convert_rpe_to_standard(rpe_data):
             else:
                 notes_below.append(note_obj)
 
-        data['judgeLineList'].append({
+        new_line = {
             'bpm': base_bpm,
             'notesAbove': notes_above,
             'notesBelow': notes_below,
-            'speedEvents': line.get('speedEvents', []),
-        })
+            'speedEvents': _merge_speed_events(line),
+        }
+        # 保留 RPE 的判定线视觉事件 (eventLayers/extended)
+        if line.get('eventLayers'):
+            new_line['eventLayers'] = line['eventLayers']
+        if line.get('extended'):
+            new_line['extended'] = line['extended']
+        data['judgeLineList'].append(new_line)
 
     return data
 

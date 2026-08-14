@@ -52,9 +52,26 @@ def detect_format(data, raw_text=None):
 def _is_rpe_v3(data):
     """
     判断是否为 RPE v3 愚人节谱：
-    1. 有 judgeLineList
-    2. 存在一条判定线同时满足：notes数 > 800 且有移动/旋转/消失事件
+    1. 必须带 RPE 导出标记 numOfNotes (官方 Phigros 谱无此字段)
+    2. 必须有 META.RPEVersion (RPE 程序导出必带; 官方谱永远没有)
+    3. 有 judgeLineList
+    4. 存在一条判定线同时满足：notes数 > 800 且有移动/旋转/消失事件
+
+    注: 不能只用"单线音符>800"判断——现代官谱普遍由一条主线承载大部分音符
+        (如 Rrharil AT 主线 1194/1300, 风屿 IN 单线 1156), 会大面积误判。
+        numOfNotes 是 RPE 导出的独有字段, 官方谱 1002 张中仅 5 张含该字段且
+        其主线均 <800 音符。
+    但官方愚人节谱(如 Spasmodic Haocore Mix)也是单线承载大量音符(2500)且
+    带 numOfNotes 字段——必须再叠加 META.RPEVersion 条件: RPE 导出的愚人节
+    谱一定带该标记, 而官方谱(含愚人节谱)永远不会带, 可完全区分二者。
     """
+    if 'numOfNotes' not in data:
+        return False
+    # 官方谱(含愚人节谱)无 META.RPEVersion; 只有 RPE 导出的谱才可能有 rpe_v3 结构
+    meta = data.get('META') or {}
+    if not meta.get('RPEVersion'):
+        return False
+
     jls = data.get('judgeLineList', [])
     if not jls:
         return False
@@ -290,13 +307,29 @@ def debug_info(data):
 # ====== PE格式解析（保持不变）======
 
 def _parse_pe_format(text):
+    """PEC 文本格式 (PhiEditer 遗留, 仅 スタートリップ / RENDA JOCEKY)
+
+    命令一览:
+      bp 时间 bpm              拍速
+      n1/n2/n3/n4 线号 ...     音符 (1=Tap 2=Drag 3=Hold 4=Flick)
+      cp 线号 时间 x y          判定线位置跳变 → judgeLineMoveEvents
+      cm 线号 起 止 x y easing  判定线移动   → judgeLineMoveEvents
+      cr 线号 起 止 角度 easing  判定线旋转   → judgeLineRotateEvents
+      cf 线号 起 止 alpha       判定线透明度 → judgeLineDisappearEvents
+      ca 线号 时间 alpha        判定线透明度(瞬时) → judgeLineDisappearEvents
+      cv 线号 时间 速度         判定线流速   → speedEvents
+      cd 线号 时间 值           (实测恒为0, 忽略)
+    """
     lines = text.strip().split('\n')
     bpm = 120.0
     judge_line_count = 0
+    EVENT_CMDS = ('n1', 'n2', 'n3', 'n4', 'cp', 'cv', 'cm', 'cr', 'cf', 'ca')
+    bpm_list = []  # bp 行 → BPMList (PE时间单位=拍, 与标准/RPE一致)
 
+    # 第一遍: 收集 bpm 与最大线号
     for raw in lines:
         raw = raw.strip()
-        if not raw or raw.startswith('#'):
+        if not raw or raw.startswith('#') or raw.startswith('&'):
             continue
         parts = raw.split()
         if not parts:
@@ -304,19 +337,29 @@ def _parse_pe_format(text):
         cmd = parts[0]
         if cmd == 'bp' and len(parts) >= 3:
             bpm = float(parts[2])
-        elif cmd == 'cp' and len(parts) >= 3:
-            idx = int(parts[1])
-            judge_line_count = max(judge_line_count, idx + 1)
+            bpm_list.append({'startTime': float(parts[1]), 'bpm': bpm})
+        elif cmd in EVENT_CMDS and len(parts) >= 2:
+            judge_line_count = max(judge_line_count, int(parts[1]) + 1)
 
     if judge_line_count == 0:
         judge_line_count = 1
 
-    judge_lines = [{'bpm': bpm, 'notesAbove': [], 'notesBelow': [], 'speedEvents': []}
+    judge_lines = [{'bpm': bpm, 'notesAbove': [], 'notesBelow': [], 'speedEvents': [],
+                    'judgeLineMoveEvents': [], 'judgeLineRotateEvents': [],
+                    'judgeLineDisappearEvents': []}
                    for _ in range(judge_line_count)]
 
-    pe_type_map = {'n1': 1, 'n2': 2, 'n3': 3, 'n4': 4}
+    # PEC 格式命令 → 官方type: n1=Tap(1) n2=Hold(3) n3=Flick(4) n4=Drag(2)
+    pe_type_map = {'n1': 1, 'n2': 3, 'n3': 4, 'n4': 2}
+    PEC_POS_SCALE = 1024.0 / 9.0   # PEC坐标范围±1024 = 官方positionX±9
+    PEC_Y_SCALE = 700.0 / 9.0      # PEC y中心300, 范围±700 → 官方positionY±9
+    K = 32.0                       # 拍→ticks (与标准/RPE一致: 1拍=32ticks)
+    cv_events = []                 # (line, time, value) 待合成 speedEvents
 
-    raw_hold_groups = {}
+    def _move_ev(t0, t1, x, y):
+        return {'startTime': t0 * K, 'endTime': t1 * K,
+                'start': (x - 1024.0) / PEC_POS_SCALE, 'end': (x - 1024.0) / PEC_POS_SCALE,
+                'start2': (y - 300.0) / PEC_Y_SCALE, 'end2': (y - 300.0) / PEC_Y_SCALE}
 
     for raw in lines:
         raw = raw.strip()
@@ -326,74 +369,68 @@ def _parse_pe_format(text):
         if not parts:
             continue
         cmd = parts[0]
-        if cmd in pe_type_map:
-            ntype = pe_type_map[cmd]
+        if cmd in pe_type_map and len(parts) >= 4:
             line_idx = int(parts[1])
-            start_time = float(parts[2])
-            pos_x = float(parts[3])
             if line_idx >= judge_line_count:
                 continue
-            if cmd == 'n3':
-                key = (line_idx, round(pos_x, 1))
-                raw_hold_groups.setdefault(key, []).append((start_time, parts))
+            start_time = float(parts[2])  # PEC时间单位=拍(beat)
+            std_time = start_time * K    # 拍→ticks
+            if cmd == 'n2' and len(parts) >= 5:
+                # n2 长条: [n2, 线号, 起始时间, 结束时间, x(±1024), 朝向, 真假]
+                end_time = float(parts[3])
+                pos_x = float(parts[4])
+                hold_time = max(end_time - start_time, 0) * K
+                note = {'type': 3, 'time': std_time, 'positionX': pos_x / PEC_POS_SCALE,
+                        'holdTime': hold_time, 'speed': 1.0}
             else:
-                norm_x = pos_x / 110.0
-                std_time = start_time * bpm / 1.875
-                note = {'type': ntype, 'time': std_time, 'positionX': norm_x, 'holdTime': 0, 'speed': 1.0}
-                if cmd == 'n2' and len(parts) >= 5:
-                    note['positionY'] = float(parts[4]) / 110.0
-                judge_lines[line_idx]['notesAbove'].append(note)
+                # n1/n3/n4 单点: [cmd, 线号, 时间, x(±1024), ...]
+                pos_x = float(parts[3])
+                note = {'type': pe_type_map[cmd], 'time': std_time, 'positionX': pos_x / PEC_POS_SCALE,
+                        'holdTime': 0, 'speed': 1.0}
+            judge_lines[line_idx]['notesAbove'].append(note)
+        elif cmd == 'cm' and len(parts) >= 6:
+            line_idx = int(parts[1])
+            if line_idx < judge_line_count:
+                t0, t1 = float(parts[2]), float(parts[3])
+                judge_lines[line_idx]['judgeLineMoveEvents'].append(
+                    _move_ev(t0, t1, float(parts[4]), float(parts[5])))
+        elif cmd == 'cp' and len(parts) >= 5:
+            line_idx = int(parts[1])
+            if line_idx < judge_line_count:
+                t0 = float(parts[2])
+                judge_lines[line_idx]['judgeLineMoveEvents'].append(
+                    _move_ev(t0, t0, float(parts[3]), float(parts[4])))
+        elif cmd == 'cr' and len(parts) >= 5:
+            line_idx = int(parts[1])
+            if line_idx < judge_line_count:
+                t0, t1, ang = float(parts[2]), float(parts[3]), float(parts[4])
+                judge_lines[line_idx]['judgeLineRotateEvents'].append(
+                    {'startTime': t0 * K, 'endTime': t1 * K, 'start': ang, 'end': ang})
+        elif cmd == 'cf' and len(parts) >= 5:
+            line_idx = int(parts[1])
+            if line_idx < judge_line_count:
+                t0, t1, alpha = float(parts[2]), float(parts[3]), float(parts[4])
+                hide = 1 if alpha < 128 else 0
+                judge_lines[line_idx]['judgeLineDisappearEvents'].append(
+                    {'startTime': t0 * K, 'endTime': t1 * K, 'start': hide, 'end': hide})
+        elif cmd == 'ca' and len(parts) >= 4:
+            line_idx = int(parts[1])
+            if line_idx < judge_line_count:
+                t0, alpha = float(parts[2]), float(parts[3])
+                hide = 1 if alpha < 128 else 0
+                judge_lines[line_idx]['judgeLineDisappearEvents'].append(
+                    {'startTime': t0 * K, 'endTime': t0 * K, 'start': hide, 'end': hide})
+        elif cmd == 'cv' and len(parts) >= 4:
+            line_idx = int(parts[1])
+            if line_idx < judge_line_count:
+                cv_events.append((line_idx, float(parts[2]) * K, float(parts[3])))
 
-    for (line_idx, _), entries in raw_hold_groups.items():
-        entries.sort(key=lambda x: x[0])
-        used = set()
-        for i in range(1, len(entries)):
-            t, parts = entries[i]
-            p1 = int(parts[4]) if len(parts) >= 5 else 0
-            if p1 == 2:
-                prev_t, prev_parts = entries[i - 1]
-                prev_p1 = int(prev_parts[4]) if len(prev_parts) >= 5 else 0
-                hold_duration = t - prev_t
-                if prev_p1 == 1 and hold_duration >= 0.05:
-                    norm_x = float(prev_parts[3]) / 110.0
-                    std_time = prev_t * bpm / 1.875
-                    std_hold = hold_duration * bpm / 1.875
-                    note = {'type': 3, 'time': std_time, 'positionX': norm_x, 'holdTime': std_hold, 'speed': 1.0}
-                    judge_lines[line_idx]['notesAbove'].append(note)
-                    used.add(i - 1)
-                    used.add(i)
+    # 合成 speedEvents: endTime 取同线下一个 cv 时间, 最后一个向后延伸 4 拍
+    for line_idx in range(judge_line_count):
+        evs = sorted([e for e in cv_events if e[0] == line_idx], key=lambda e: e[1])
+        for i, (_, t, sp) in enumerate(evs):
+            end_t = evs[i + 1][1] if i + 1 < len(evs) else t + 32.0 * 4
+            judge_lines[line_idx]['speedEvents'].append(
+                {'startTime': t, 'endTime': end_t, 'value': sp})
 
-        i = 0
-        while i < len(entries):
-            if i in used:
-                i += 1
-                continue
-            t, parts = entries[i]
-            pos_x = float(parts[3])
-            gap = 0.50
-            group = [entries[i]]
-            j = i + 1
-            while j < len(entries):
-                if j in used or entries[j][0] - group[-1][0] > gap:
-                    break
-                group.append(entries[j])
-                j += 1
-            first_t = group[0][0]
-            last_t = group[-1][0]
-            hold_duration = last_t - first_t
-            if hold_duration < 0.05:
-                for _, gp in group:
-                    norm_x = float(gp[3]) / 110.0
-                    std_time = first_t * bpm / 1.875
-                    if judge_line_count > 0:
-                        judge_lines[line_idx]['notesAbove'].append(
-                            {'type': 1, 'time': std_time, 'positionX': norm_x, 'holdTime': 0, 'speed': 1.0})
-            else:
-                norm_x = float(parts[3]) / 110.0
-                std_time = first_t * bpm / 1.875
-                std_hold = hold_duration * bpm / 1.875
-                judge_lines[line_idx]['notesAbove'].append(
-                    {'type': 3, 'time': std_time, 'positionX': norm_x, 'holdTime': std_hold, 'speed': 1.0})
-            i = j
-
-    return {'formatVersion': 3, 'judgeLineList': judge_lines}
+    return {'formatVersion': 3, 'BPMList': bpm_list, 'judgeLineList': judge_lines}

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Phigros 难度定数预测系统 v7.1</title>
+<title>Phigros 难度定数预测系统 v10</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; background: #0f0f14; color: #e0e0e8; min-height: 100vh; }
@@ -85,8 +85,8 @@ header .badge { display: inline-block; background: #e94560; color: #fff; font-si
 <body>
 <div class="container">
     <header>
-        <h1>Phigros 难度定数预测 <span class="badge">v8.3</span></h1>
-        <p>高潮段平均TPS替代峰值密度 · BPM变速积分 · drag/flick不计配置</p>
+        <h1>Phigros 难度定数预测 <span class="badge">v10</span></h1>
+        <p>Level-Aware GB + Boost · 按难度档预测 · 982张官谱训练 · 测试MAE 0.55</p>
     </header>
 
     <div class="drop-zone" id="dropZone">
@@ -119,6 +119,15 @@ header .badge { display: inline-block; background: #e94560; color: #fff; font-si
                 style="width:80px;accent-color:#e94560;"
                 oninput="onSpeedChange();">
             <span id="speedVal" style="color:#e0e0e8;font-size:13px;min-width:35px;">1.0x</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+            <label for="levelSelect" style="font-size:12px;color:#888;">难度档:</label>
+            <select id="levelSelect" style="background:#1a1a24;color:#e0e0e8;border:1px solid #333;border-radius:6px;padding:6px 10px;font-size:13px;">
+                <option value="EZ">EZ</option>
+                <option value="HD">HD</option>
+                <option value="IN" selected>IN</option>
+                <option value="AT">AT</option>
+            </select>
         </div>
     </div>
 
@@ -216,6 +225,8 @@ async function doPredict() {
     formData.append('format', format);
     const speed = document.getElementById('speedSlider').value;
     formData.append('speed', speed);
+    const level = document.getElementById('levelSelect').value;
+    formData.append('level', level);
 
     try {
         const resp = await fetch('/predict', { method: 'POST', body: formData });
@@ -314,11 +325,11 @@ function renderResults(results) {
             <div class="result-header" onclick="toggleDetail(${idx})">
                 <div class="song-info">
                     <div class="name">${r.chart_name || r.song_name || r.source_file}</div>
-                    <div class="meta">${[r.composer, r.charter, r.level_tag ? '['+r.level_tag+']' : ''].filter(Boolean).join(' · ')} ${r.format}</div>
+                    <div class="meta">${[r.composer, r.charter, r.level_tag ? '['+r.level_tag+']' : ''].filter(Boolean).join(' · ')} ${r.format} <span style="color:#e94560;font-weight:600;">[${r.level_used || 'IN'}]</span></div>
                 </div>
                 <div class="pred">
                     <div class="value" style="color:${r.prediction >= 17 ? '#e94560' : r.prediction >= 15 ? '#f39c12' : '#2ecc71'}">${r.prediction.toFixed(2)}</div>
-                    <div class="gb-label">GB ${r.gb.toFixed(2)} + Adj.Boost ${r.boost_adj.toFixed(2)} <span style="font-size:11px;color:#888">(raw ${r.boost.toFixed(2)} ratio=${r.boost_ratio.toFixed(3)})</span></div>
+                    <div class="gb-label">GB ${r.gb.toFixed(2)} + Boost ${r.boost_adj.toFixed(2)}${r.bias > 0.01 ? ' + Bias ' + r.bias.toFixed(2) : ''} <span style="font-size:11px;color:#888">(raw ${r.boost.toFixed(2)})</span></div>
                 </div>
                 <div class="expand">&#x25BC;</div>
             </div>
