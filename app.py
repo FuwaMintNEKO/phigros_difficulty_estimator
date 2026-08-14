@@ -21,6 +21,34 @@ MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(�
 CAPS = m.get('caps', {})  # boost excess 封顶
 VERSION = f'11.7b (Level-Aware GB + Boost + 多押分布 + drag滑动 + 校准0.55/0.40/0.20) 全{ m.get("n_train", "?") }官谱'
 
+# ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
+_TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
+try:
+    with open(_TAG_PATH, encoding='utf-8') as _f:
+        TAG_TH = json.load(_f)
+    TAG_DIM = [('底力', 'above_avg_density_mean'), ('多押', 'weighted_mf_score_per_sec'),
+               ('楼梯', 'stair_speed_avg'), ('32分', 'thirtysecond_run_ratio'),
+               ('爆发', 'fast_ms_100_ratio'), ('读谱', 'jline_movement_density'),
+               ('变速', 'tempo_change_log_density'), ('耐力', 'above_avg_duration_sec'),
+               ('高BPM', 'bpm'), ('纵连', 'jack_density'), ('叠键', 'chord_jack_3plus_pairs'),
+               ('位移', 'movement_per_second')]
+except Exception:
+    TAG_TH = {}
+    TAG_DIM = []
+
+def compute_tags(feats):
+    """按官谱15+阈值给谱面打难点标签"""
+    if not TAG_TH:
+        return []
+    out = []
+    for name, fk in TAG_DIM:
+        if feats.get(fk, 0) >= TAG_TH.get(name, 1e9):
+            out.append(name)
+    t6 = feats.get('tracks_6plus_sec', 0) / max(feats.get('tracks_active_sec', 1), 0.01)
+    if t6 >= TAG_TH.get('定轨', 1.0):
+        out.append('定轨')
+    return out
+
 # ===== 密度域对齐 (自制谱专属, 以官谱分布为目标) =====
 # 自制谱 IN(14-16.5) 密度特征系统性高于官谱同段 (domain gap, 含 drag 填充),
 # 对齐 = 减去 delta[feat] (自制均值-官谱均值), 让预测回到官谱尺度。
@@ -297,6 +325,7 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None):
         'categories': dims.get('categories', {}),
         'cat_raws': dims.get('cat_raws', {}),
         'prediction': round(p_final, 4),
+        'tags': compute_tags(feats),
         'version': VERSION,
         'total_notes': feats_display.get('total_notes', 0),
         'duration_sec': round(feats_display.get('duration_sec', 0), 1),
