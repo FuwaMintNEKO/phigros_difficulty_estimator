@@ -16,7 +16,7 @@ gb, scaler = m['gb'], m['scaler']
 FN, P95, P99 = m['feature_names'], m['p95_vals'], m['p99_vals']
 LV_ORDER = m.get('lv_order', ['EZ','HD','IN','AT'])
 CAPS = m.get('caps', {})
-FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)
+FLAT = MANUAL_FLAT  # v11.12: 统一用 boost_config (锚点调优)
 _ALIGN = json.load(open(os.path.join(_ROOT, 'data', 'domain_align.json'), encoding='utf-8')).get('delta', {})
 MF_FEATS = {'weighted_mf_score_per_sec', 'multi_finger_3plus_events', 'discrete_mf_ratio', 'chord_alternation_rate'}
 EFF_FEATS = {'eff_peak_tps_1s', 'eff_avg_tps_1s'}
@@ -71,7 +71,7 @@ def predict(feats_raw, level='IN'):
     dens = feats_raw.get('above_avg_density_mean', 0)
     ml = feats_raw.get('multi_line_sim_events', 0)
     wmf = feats_raw.get('weighted_mf_score_per_sec', 0)
-    stack_scale = _stack_scale_for(feats_raw)
+    is_stack = _stack_scale_for(feats_raw) < 1.0   # v11.11: 段降权在循环外按预测段应用
     if mf3 >= 30 and ml >= 100:
         mf_scale, dens_s = 0.45, 0.85
     elif mf3 >= 30:
@@ -109,7 +109,6 @@ def predict(feats_raw, level='IN'):
         if fname in DENS_FEATS and mf3 >= 30 and ml >= 100: co2 = co * dens_s
         if fname == 'weighted_mf_score_per_sec': co2 = co * wmf_scale
         if fname in EXTREME: co2 = co * extreme_scale
-        if stack_scale < 1.0: co2 = co2 * stack_scale
         x_ = co2 * (e**0.70)
         p99 = max(P99.get(fname,0), bl*0.5)
         if v > p99:
@@ -118,6 +117,9 @@ def predict(feats_raw, level='IN'):
             x_ += co2*max(0,pe)**0.70*0.5
         total += x_
     pred = p_gb + total
+    # v11.11: 堆料降权仅中段 (14-16.5; 高难堆料不降)
+    if is_stack and 14 < pred <= 16.5:
+        pred -= total * 0.08
     act = feats_raw.get('tracks_active_sec', 0)
     if act > 0:
         r4 = feats_raw.get('tracks_4plus_sec', 0) / act
@@ -128,7 +130,7 @@ def predict(feats_raw, level='IN'):
     if hr >= 0.6: pred += 0.7
     elif hr >= 0.4: pred += 0.5
     elif hr >= 0.25: pred += 0.3
-    for lo, hi, adj in [(14,15,0.41),(15,16,0.26),(16,17,0.06)]:
+    for lo, hi, adj in [(14,15,0.51),(15,16,0.36),(16,17,0.16)]:
         if lo < pred <= hi: pred -= adj; break
     return pred, p_gb, total
 

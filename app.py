@@ -16,10 +16,17 @@ with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
 gb = m['gb']; scaler = m['scaler']
 FN = m['feature_names']; P95 = m['p95_vals']; P99 = m['p99_vals']
+# v11.12: jline P95 修正 (训练阈值被瞬移/演出谱污染: 读谱特征几乎永不触发, Feeling Blue类被低估)
+# 实际分布 P95: movement=107/rotate=18.6/disappear=15.1 (模型值 289/153/201)
+_JLINE_P95_FIX = {'jline_movement_density': 107.1, 'jline_rotate_density': 18.6, 'jline_disappear_density': 15.1}
+for _jk, _jv in _JLINE_P95_FIX.items():
+    if _jk in P95:
+        P95[_jk] = _jv
 LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
-MANUAL_FLAT = m.get('MANUAL_FLAT', MANUAL_FLAT)  # 优先用训练时的权重(可能含变体覆盖)
+# v11.12: 权重统一用 boost_config (手工调优层; 锚点调优后pkl内旧权重作废)
+MANUAL_FLAT = MANUAL_FLAT
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.10 (Level-Aware GB + Boost + 毫秒归一化 + 锁手检测 + RPE修复 + hold加成 + 校准0.51/0.36/0.16) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'11.12 (锚点调优: drag/纵连降权 + 耐力/速度提升 + jline P95修正 + 段降权) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
 _TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
@@ -173,7 +180,7 @@ ML_HEAVY_DENS = 0.85     # 多面型: 密度特征系数
 EXTREME_FEATS_COND = {'cross_hand_density', 'jline_relative_cross', 'thirtysecond_run_max', 'thirtysecond_run_ratio', 'lane_switch_density'}
 EXTREME_SCALE_DF = 1.30   # 双指谱: 换手/32分交互是AP最难点, 温和拉高
 EXTREME_SCALE_MF = 0.70   # 多指谱: 可分摊, 压低 (校准后多指仍+0.19, 强化抵抗社区虚高)
-_CALIB_TABLE = [(14, 15, 0.41), (15, 16, 0.26), (16, 17, 0.06)]  # v11.10: 删32分特征后偏差变化, 扫描最优  # 预测时校准(仅自制谱); v11.8: 堆料降权后微调-0.04
+_CALIB_TABLE = [(14, 15, 0.51), (15, 16, 0.36), (16, 17, 0.16)]  # v11.10: 删32分特征后偏差变化, 扫描最优  # 预测时校准(仅自制谱); v11.8: 堆料降权后微调-0.04
 
 def compute_boost(feats, speed=1.0, is_custom=False):
     """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)
@@ -201,9 +208,9 @@ def compute_boost(feats, speed=1.0, is_custom=False):
     # v11.3: 档位判定统一用feats(与改json一致); wmf堆料档平滑化(12~18线性过渡)
     mf3 = feats.get('multi_finger_3plus_events', 0)
     dens = feats.get('above_avg_density_mean', 0)
-    # v11.8: 堆料型降权 v2 (精细: 仅高估标签组合 叠键/多押/变速/位移 ≥2 → ×0.92; 实验A: MAE 0.575→0.568, 避免楼梯/32分连带低估)
+    # v11.10: 堆料降权移到 predict_one_chart 按预测段应用 (16.5+高难堆料是真难度, 不降)
     _HIGH_TAGS = {'叠键', '多押', '变速', '位移'}
-    _stack_scale = 0.92 if (is_custom and sum(1 for t in compute_tags(feats) if t in _HIGH_TAGS) >= 2) else 1.0
+    _stack_scale = 1.0
     if mf3 >= 30 and feats.get('multi_line_sim_events', 0) >= ML_HEAVY_TH:
         mf_scale = ML_HEAVY_MF       # 多面下落型(可馅蜜协调): 重压
         dens_scale_ml = ML_HEAVY_DENS
@@ -352,6 +359,11 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None, chart_n
     p_boost, dims, key_contribs = compute_boost(feats, speed=1.0, is_custom=is_custom)
     p_final = p_gb_residual + p_boost
     if is_custom:
+        # v11.10: 堆料降权仅中段 (14-16.5; 高难堆料不降, 修复16.5+系统性低估)
+        _HIGH_TAGS = {'叠键', '多押', '变速', '位移'}
+        if 14 < p_final <= 16.5 and sum(1 for t in compute_tags(feats) if t in _HIGH_TAGS) >= 2:
+            p_final -= p_boost * 0.08
+        # 后续原逻辑 (hold加成/校准) 沿用 p_final
         # v11.1: 定轨键盘段加成 (4k/5k/6k: 固定槽位密集击打, 多指分工双指无解; 占比归一化防长谱误伤)
         _act = feats.get('tracks_active_sec', 0)
         if _act > 0:
