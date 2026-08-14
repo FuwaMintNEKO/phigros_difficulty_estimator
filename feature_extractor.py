@@ -953,9 +953,11 @@ def extract_features(chart_data, speed=1.0):
             for i in range(len(intervals))
         ])
 
-        # global: 极短间隔密度指标 (保持原有微窗口密度测量)
-        features['global_jack_count'] = int(np.sum(intervals < 0.125))
-        features['miniburst_count'] = int(np.sum(intervals < 0.0625))
+        # global: 极短间隔密度指标 — v11.14: 只算tap+hold的相邻间隔, 排除drag/flick; 排除多押(0ms)
+        # 用户底线: 分音(16分/24分)只由tap+hold构成; drag(零操作)/flick不算; 0ms=多押非连续音符
+        core_adj = (core_mask[1:] & core_mask[:-1]) & (intervals_sec > 1e-6)
+        features['global_jack_count'] = int(np.sum(core_adj & (intervals_sec < 0.125)))
+        features['miniburst_count'] = int(np.sum(core_adj & (intervals_sec < 0.0625)))
         features['miniburst_density'] = features['miniburst_count'] / max(dt, 0.01)
 
         # position-aware jack: 同线同位置且间隔 < 100ms
@@ -988,7 +990,9 @@ def extract_features(chart_data, speed=1.0):
         pos_diffs_arr = np.abs(np.diff(positions))
         same_line_mask = jl_idx[1:] == jl_idx[:-1]
         its_full = intervals_sec
-        its = intervals_sec[same_line_mask]  # 同线相邻 (跨线交错非手指速度)
+        # v11.14: 只算tap+hold且排除多押(0ms); 同线限定保留 (跨线交错非手指速度)
+        core_adj_full = (core_mask[1:] & core_mask[:-1]) & (intervals_sec > 1e-6)
+        its = intervals_sec[same_line_mask & core_adj_full]
         features['fast_ms_050_ratio'] = float(np.sum(its < 0.05)) / max(len(its), 1)
         features['fast_ms_100_ratio'] = float(np.sum((its >= 0.05) & (its < 0.10))) / max(len(its), 1)
         features['fast_ms_150_ratio'] = float(np.sum((its >= 0.10) & (its < 0.15))) / max(len(its), 1)
