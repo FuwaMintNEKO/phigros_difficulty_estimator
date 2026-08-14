@@ -62,16 +62,18 @@ if __name__ == '__main__':
     # 社区谱 (json_unranked_4star)
     from unified_parser import load_chart_from_bytes
     json_dir = os.path.join(_ROOT, 'data', 'phira', 'json_unranked_4star')
-    if targets and targets[0] == '--rpe':
+    ranked_dir = os.path.join(_ROOT, 'data', 'phira', 'json')
+    if targets and targets[0] in ('--rpe', '--ranked'):
         ids = targets[1:]
+        base = ranked_dir if targets[0] == '--ranked' else json_dir
         for cid in ids:
-            fp = os.path.join(json_dir, f'{cid}.json')
+            fp = os.path.join(base, f'{cid}.json')
             if not os.path.exists(fp):
                 print(f'{cid} 不存在'); continue
             with open(fp, 'rb') as f:
                 cd, raw = load_chart_from_bytes(f.read())
             rows, dur = timeline(cd)
-            render(rows, dur, f'社区谱 id={cid}')
+            render(rows, dur, f'谱面 id={cid}')
         sys.exit(0)
     chart_dir = os.path.join(_ROOT, 'data', 'chart')
     for kw in targets:
