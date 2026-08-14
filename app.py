@@ -60,6 +60,51 @@ def _domain_warning(feats, pred):
         warns.append('判定线表演密集: 玩家共识对其定价保守')
     return warns
 
+# ===== kyou站玩家共识类型 (v11.8: 官谱直接引用, 自制谱分类器近似) =====
+_KYOU_PATH = os.path.join(os.path.dirname(__file__), 'data', 'phira', 'kyou_tags.json')
+try:
+    with open(_KYOU_PATH, encoding='utf-8') as _f:
+        _KYOU = json.load(_f)
+except Exception:
+    _KYOU = []
+_KYOU_BY_NAME = {}
+import re as _re
+for _k in _KYOU:
+    _kn = _re.sub(r'[^a-z0-9\u4e00-\u9fff]', '', _k.get('song', '').lower())
+    if _kn:
+        _KYOU_BY_NAME[_kn] = _k.get('tag', '').replace('?', '').strip()
+_KYOU_CLF_FEATS = ['above_avg_density_mean', 'eff_avg_tps_1s', 'weighted_mf_score_per_sec', 'stair_speed_avg',
+                   'thirtysecond_run_ratio', 'fast_ms_100_ratio', 'jline_movement_density', 'tempo_change_log_density',
+                   'above_avg_duration_sec', 'bpm', 'jack_density', 'chord_jack_3plus_pairs', 'movement_per_second',
+                   'chord_events_peak_8s', 'avg_movement', 'position_iqr', 'rhythm_entropy', 'pattern_switch_rate', 'drag_ratio']
+_KYOU_CLF = None
+try:
+    with open(os.path.join(os.path.dirname(__file__), 'models', 'kyou_classifier.pkl'), 'rb') as _f:
+        _KCLF = pickle.load(_f)
+    _KYOU_CLF = _KCLF['clf']
+except Exception:
+    _KYOU_CLF = None
+
+def kyou_type_for(feats, name='', is_custom=True):
+    """返回玩家共识类型: 官谱按kyou数据, 自制谱用分类器近似"""
+    if not is_custom and name:
+        kn = _re.sub(r'[^a-z0-9\u4e00-\u9fff]', '', name.lower())
+        if kn in _KYOU_BY_NAME:
+            return {'type': _KYOU_BY_NAME[kn], 'source': 'kyou共识'}
+        for _kn, _tag in _KYOU_BY_NAME.items():
+            if len(_kn) >= 4 and (_kn in kn or kn in _kn):
+                return {'type': _tag, 'source': 'kyou共识'}
+    if _KYOU_CLF is not None:
+        x = np.array([[feats.get(k, 0) for k in _KYOU_CLF_FEATS]])
+        try:
+            probs = _KYOU_CLF.predict_proba(x)[0]
+            cls = _KYOU_CLF.classes_[int(np.argmax(probs))]
+            conf = float(np.max(probs))
+            return {'type': str(cls), 'confidence': round(conf, 2), 'source': '近似'}
+        except Exception:
+            pass
+    return None
+
 # ===== 密度域对齐 (自制谱专属, 以官谱分布为目标) =====
 # 自制谱 IN(14-16.5) 密度特征系统性高于官谱同段 (domain gap, 含 drag 填充),
 # 对齐 = 减去 delta[feat] (自制均值-官谱均值), 让预测回到官谱尺度。
@@ -270,7 +315,7 @@ def _level_onehot(level):
     vec[LV_ORDER.index(lv)] = 1.0
     return vec
 
-def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None):
+def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None, chart_name=''):
     """v10.0: GB残差(含level特征) + 纯Boost叠加 = 最终定数
     is_custom: True=自制谱(应用密度域对齐), None=自动判定"""
     if is_custom is None:
@@ -340,6 +385,7 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None):
         'cat_raws': dims.get('cat_raws', {}),
         'prediction': round(p_final, 4),
         'tags': compute_tags(feats),
+        'kyou_type': kyou_type_for(feats, chart_name or song_name or '', is_custom),
         'domain_warning': _domain_warning(feats, p_final),
         'version': VERSION,
         'total_notes': feats_display.get('total_notes', 0),
@@ -389,7 +435,7 @@ def predict_one():
             return jsonify({'error': '无法解析谱面格式'}), 400
 
         level = request.args.get('level', 'IN')
-        result, err = predict_one_chart(chart_data, level=level,
+        result, err = predict_one_chart(chart_data, level=level, chart_name=f.filename,
                                         is_custom=is_custom_chart(chart_data, raw_text))
         if result:
             result['source_file'] = 'overlay'
@@ -453,7 +499,7 @@ def predict():
                         if not internal_name and raw_text:
                             internal_name = extract_pe_name(raw_text)
                         chart_name = format_chart_name(name, internal_name)
-                        result, err = predict_one_chart(chart_data, speed, level,
+                        result, err = predict_one_chart(chart_data, speed, level, chart_name=f.filename,
                                                         is_custom=is_custom_chart(chart_data, raw_text))
                         if result:
                             result['source_file'] = f.filename
@@ -478,7 +524,7 @@ def predict():
                 if not internal_name and raw_text:
                     internal_name = extract_pe_name(raw_text)
                 chart_name = format_chart_name(f.filename, internal_name)
-                result, err = predict_one_chart(chart_data, speed, level,
+                result, err = predict_one_chart(chart_data, speed, level, chart_name=f.filename,
                                                 is_custom=is_custom_chart(chart_data, raw_text))
                 if result:
                     result['source_file'] = f.filename
