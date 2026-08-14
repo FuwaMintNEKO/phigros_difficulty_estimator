@@ -148,10 +148,10 @@ for lbl, cond in [('多指', mf>=30), ('双指', mf<=5), ('混合', (mf>5)&(mf<3
         print(f'  {lbl}: n={len(mk)} | v11.2: {e2[mk].mean():+.3f}/{np.abs(e2[mk]).mean():.3f} | v11.8b: {e8[mk].mean():+.3f}/{np.abs(e8[mk]).mean():.3f}')
 # 保存
 import csv as _csv
-with open(os.path.join(_ROOT, 'data', 'phira', 'v112_vs_v118b.csv'), 'w', encoding='utf-8-sig', newline='') as f:
+with open(os.path.join(_ROOT, 'data', 'phira', 'v112_vs_v118b_id.csv'), 'w', encoding='utf-8-sig', newline='') as f:
     w = _csv.writer(f)
-    w.writerow(['name', 'level', 'diff', 'pred_v112', 'pred_v118b', 'err_v112', 'err_v118b'])
+    w.writerow(['id', 'name', 'level', 'diff', 'pred_v112', 'pred_v118b', 'err_v112', 'err_v118b'])
     for i, r in enumerate(ranked):
-        w.writerow([r['name'], r['level'], r['diff'], round(ps2[i],3), round(ps8[i],3), round(e2[i],3), round(e8[i],3)])
+        w.writerow([r['id'], r['name'], r['level'], r['diff'], round(ps2[i],3), round(ps8[i],3), round(e2[i],3), round(e8[i],3)])
 print('\n已保存: v112_vs_v118b.csv')
 print('DONE')

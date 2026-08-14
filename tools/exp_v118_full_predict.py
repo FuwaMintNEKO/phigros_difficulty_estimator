@@ -97,7 +97,7 @@ ranked = [r for r in cache['ranked'] if r['diff'] and r['diff'] > 10]
 R = []
 for r in ranked:
     pr, g, b, ts = predict(r['feats'], r['level'])
-    R.append({'name': r['name'], 'level': r['level'], 'diff': r['diff'], 'pred': pr, 'gb': g, 'boost': b,
+    R.append({'id': r['id'], 'name': r['name'], 'level': r['level'], 'diff': r['diff'], 'pred': pr, 'gb': g, 'boost': b,
               'err': pr - r['diff'], 'mf3': r['feats'].get('multi_finger_3plus_events', 0), 'tags': '+'.join(ts) if ts else '-'})
 print(f'===== RANKED {len(R)} 张 (v11.7b 生产路径) =====')
 ds = np.array([r['diff'] for r in R]); ps = np.array([r['pred'] for r in R]); errs = ps - ds
@@ -113,9 +113,9 @@ for lbl, cond in [('多指(mf3>=30)', mf>=30), ('双指(mf3<=5)', mf<=5), ('混�
     mk = np.where(cond)[0]
     if len(mk): print(f'  {lbl}: n={len(mk)} bias={errs[mk].mean():+.3f} MAE={np.abs(errs[mk]).mean():.3f}')
 # 保存 ranked 详细 CSV
-with open(os.path.join(_ROOT, 'data', 'phira', 'v117_ranked_predictions.csv'), 'w', encoding='utf-8-sig', newline='') as f:
+with open(os.path.join(_ROOT, 'data', 'phira', 'v117b_ranked_predictions.csv'), 'w', encoding='utf-8-sig', newline='') as f:
     w = csv.writer(f)
-    w.writerow(['name', 'level', 'diff', 'pred', 'gb', 'boost', 'err', 'mf3', 'tags'])
-    for r in R: w.writerow([r['name'], r['level'], r['diff'], round(r['pred'],3), round(r['gb'],3), round(r['boost'],3), round(r['err'],3), r['mf3'], r['tags']])
+    w.writerow(['id', 'name', 'level', 'diff', 'pred', 'gb', 'boost', 'err', 'mf3', 'tags'])
+    for r in R: w.writerow([r['id'], r['name'], r['level'], r['diff'], round(r['pred'],3), round(r['gb'],3), round(r['boost'],3), round(r['err'],3), r['mf3'], r['tags']])
 print('\n已保存: v117_ranked_predictions.csv')
 print('DONE-RANKED')
