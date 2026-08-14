@@ -141,9 +141,12 @@ def collect_speed_events(judge_lines):
                 st = ev.get('startTime', 0)
                 et = ev.get('endTime', 0)
             else:
-                # RPE 格式: start/end = 每秒下降120px 的单位; 基准 5 = 官谱 1.0 倍率
-                # (如 start=12 → 1440px/s → 2.4x), startTime/endTime 为 [m,b,d]
-                value = ev.get('start', 5) / 5.0
+                # RPE 格式: start/end 是 RPE速度单位; 官方转换器(PhiChartRender rephiedit.ts)规则:
+                # value = value / (0.6 / (120/900)) = value / 4.5
+                # (v11.15修复: 之前除5是错的)
+                # RPE 特殊值 9990 = 瞬移演出 (等效官谱消失), 裁剪为0 (不参与速度统计)
+                _sv = ev.get('start', 4.5)
+                value = 0.0 if abs(_sv) >= 9000 else _sv / 4.5
                 st = ev.get('startTime', [0, 0, 1])
                 et = ev.get('endTime', [0, 0, 1])
             all_events.append({
