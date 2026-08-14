@@ -136,17 +136,18 @@ def collect_speed_events(judge_lines):
         events = top_events if top_events else layer_events
         for ev in events:
             if 'value' in ev:
-                # 官谱格式: value = 倍率
-                value = ev.get('value', 1.0)
+                # 官谱格式: value = 倍率; v11.15: >50的瞬移演出值(如DerSchneid的499)裁剪为0
+                _ov = ev.get('value', 1.0)
+                value = 0.0 if abs(_ov) >= 50 else _ov
                 st = ev.get('startTime', 0)
                 et = ev.get('endTime', 0)
             else:
                 # RPE 格式: start/end 是 RPE速度单位; 官方转换器(PhiChartRender rephiedit.ts)规则:
                 # value = value / (0.6 / (120/900)) = value / 4.5
                 # (v11.15修复: 之前除5是错的)
-                # RPE 特殊值 9990 = 瞬移演出 (等效官谱消失), 裁剪为0 (不参与速度统计)
+                # RPE 特殊值 9990/1000 = 瞬移演出 (等效官谱的499/80), 裁剪为0
                 _sv = ev.get('start', 4.5)
-                value = 0.0 if abs(_sv) >= 9000 else _sv / 4.5
+                value = 0.0 if abs(_sv) >= 200 else _sv / 4.5
                 st = ev.get('startTime', [0, 0, 1])
                 et = ev.get('endTime', [0, 0, 1])
             all_events.append({
@@ -1451,23 +1452,28 @@ def extract_features(chart_data, speed=1.0):
         if len(tap_only) > 5:
             bucket_edges = np.array([-4.5, -3.0, -1.5, 0, 1.5, 3.0, 4.5])
             finger_idx = np.clip(np.digitize(tap_pos, bucket_edges) - 1, 0, 5)
+            # v11.15修复: 窗口单位错误 (window_beats=sec*bpm/1.875 错; 应=sec*bpm/60拍)
+            # 且 times 未排序, times[0]/[-1]不是首尾时间 — 先排序
+            order = np.argsort(tap_only)
+            tap_only_sorted = tap_only[order]
+            finger_idx_sorted = finger_idx[order]
             window_sec = 0.5
-            window_beats = window_sec * bpm / 1.875
-            step_beats = max(window_beats / 4, 0.01)
-            t0 = times[0]
-            t_end = times[-1]
+            window_ticks = window_sec * 32 * bpm / 60.0  # tick窗口 (1拍=32tick, bpm拍/分)
+            step_ticks = max(window_ticks / 4, 1.0)
+            t0 = tap_only_sorted[0]
+            t_end = tap_only_sorted[-1]
             cur = t0
             all_finger_peaks = []
             max_peak = 0
             while cur < t_end:
-                win_end = cur + window_beats
-                m = (tap_only >= cur) & (tap_only < win_end)
+                win_end = cur + window_ticks
+                m = (tap_only_sorted >= cur) & (tap_only_sorted < win_end)
                 if np.sum(m) > 1:
-                    counts = np.bincount(finger_idx[m], minlength=6)
+                    counts = np.bincount(finger_idx_sorted[m], minlength=6)
                     peak = np.max(counts) / window_sec
                     all_finger_peaks.append(peak)
                     max_peak = max(max_peak, peak)
-                cur += step_beats
+                cur += step_ticks
             features['finger_peak_tps'] = round(max_peak, 4)
             features['finger_avg_peak_tps'] = round(np.mean(all_finger_peaks), 4) if all_finger_peaks else 0
             overall_tps = features.get('tap_per_second', 1)
@@ -1682,11 +1688,13 @@ def extract_features(chart_data, speed=1.0):
                     if abs(beats_val - target) / max(target, 0.001) < 0.12:
                         matched = frac; break
                 if matched:
-                    if matched >= 4: fast_16th += 1
-                    if matched >= 8: fast_32nd += 1
-                    if matched >= 12: fast_24th += 1
-                    if matched >= 16: fast_48th += 1
-                    if matched >= 32: fast_64th += 1
+                    # v11.15修复: 分音阈值错误 (12不是24分!)
+                    # 16分=4, 24分=6, 32分=8, 48分=12, 64分=16
+                    if matched == 4: fast_16th += 1
+                    if matched == 6: fast_24th += 1
+                    if matched == 8: fast_32nd += 1
+                    if matched == 12: fast_48th += 1
+                    if matched == 16: fast_64th += 1
                     if matched >= 2: rhythm_counts[matched] = rhythm_counts.get(matched, 0) + 1
                     break
                 elif beats_val > 0.02:
