@@ -9,10 +9,11 @@ NOTE_FLICK = 4
 
 
 def _parse_bpm_timeline(chart_data):
-    """从 BPMList 构建 BPM 时间线 [(start_beat, bpm), ...] 按起始拍排序
+    """从 BPMList 构建 BPM 时间线 [(start_beat, bpm), ...] 按起始拍排序 (时间线单位=拍)
     兼容两种startTime格式:
-      - RPE格式: [measure, beat, division] (list)
-      - 标准格式: float (已是beats)
+      - RPE原始格式: [measure, beat, division] (list) → (m + b/d)拍
+      - 标准官谱格式: float/int = tick (1拍=32tick) → ÷32得拍
+    v11.15e: 修复 — 原把标准float当拍直接存, 官谱BPMList startTime是tick, 错32倍。
     """
     bpm_list = chart_data.get('BPMList', [])
     timeline = []
@@ -25,7 +26,7 @@ def _parse_bpm_timeline(chart_data):
                 else:
                     start_beat = st[0]
             else:
-                start_beat = float(st) if st else 0.0
+                start_beat = float(st) / 32.0 if st else 0.0
             timeline.append((start_beat, entry['bpm']))
         timeline.sort(key=lambda x: x[0])
     return timeline
@@ -176,7 +177,8 @@ def extract_features(chart_data, speed=1.0):
     hold_times = np.array([n.get('holdTime', 0) for n in all_notes])
     note_bpms = np.array([n['bpm'] for n in all_notes])  # 每个音符的真实BPM
 
-    dt = float(times[-1]) if n_notes > 0 else 0
+    # v11.15e: 时长=首末差 (首音符常不在tick0, times[-1]会把duration偏高5~10%)
+    dt = float(times[-1] - times[0]) if n_notes > 0 else 0
     features = {}
 
     features['total_notes'] = n_notes
@@ -215,13 +217,14 @@ def extract_features(chart_data, speed=1.0):
     features['drag_flick_ratio'] = (n_drag + n_flick) / max(n_notes, 1)  # 滑/粉占比（Phigros特有）
 
     ds = max(features['duration_sec'], 0.01)
+    db = max(dt / 32.0, 0.01)  # v11.15e: 每拍统计的分母必须是拍(dt是tick, ÷32)
     features['notes_per_second'] = n_notes / ds
-    features['notes_per_beat'] = n_notes / max(dt, 0.01)
+    features['notes_per_beat'] = n_notes / db
     features['tap_per_second'] = n_tap / ds
-    features['tap_per_beat'] = n_tap / max(dt, 0.01)
+    features['tap_per_beat'] = n_tap / db
     core_n = n_tap + n_hold  # 蓝键+长条 = 核心音符
     features['core_notes_per_second'] = core_n / ds
-    features['core_notes_per_beat'] = core_n / max(dt, 0.01)
+    features['core_notes_per_beat'] = core_n / db
 
     # ====== 真实密度（排除 >1s 间隙，反映击打时真实密度水平） ======
     # 倍速时阈值等比缩放：2x速下0.5秒的间隙就相当于原速1秒
@@ -396,15 +399,17 @@ def extract_features(chart_data, speed=1.0):
             if any(n['type'] == NOTE_HOLD for n in notes):
                 mf_with_hold += 1
             pos = [n.get('positionX', 0) for n in notes]
-            has_left = any(p < -0.3 for p in pos)
-            has_right = any(p > 0.3 for p in pos)
+            # v11.15e: positionX实际±9刻度(官谱±7实测/RPE±9), ±0.3过窄→虚高; ±1.5与lane_switch阈值口径一致
+            has_left = any(p < -1.5 for p in pos)
+            has_right = any(p > 1.5 for p in pos)
             if has_left and has_right:
                 mf_cross_hand += 1
     features['mf_with_hold_count'] = mf_with_hold
     features['mf_with_hold_ratio'] = mf_with_hold / max(mf_total, 1)
 
     mf_times = sorted([t for t, notes in core_windows.items() if len(notes) >= 3])
-    features['dense_mf_count'] = sum(1 for i in range(1, len(mf_times)) if mf_times[i] - mf_times[i-1] <= 0.25)
+    # v11.15e: 0.25拍=8tick (原0.25tick≈8ms, 3+押连打永远不触发)
+    features['dense_mf_count'] = sum(1 for i in range(1, len(mf_times)) if mf_times[i] - mf_times[i-1] <= 8.0)
     features['dense_mf_ratio'] = features['dense_mf_count'] / max(len(mf_times), 1) if len(mf_times) > 1 else 0
 
     features['mf_events_per_second'] = mf_total / ds
@@ -418,7 +423,8 @@ def extract_features(chart_data, speed=1.0):
     for tk, notes in all_windows.items():
         if len(notes) >= 2:
             pos = [n.get('positionX', 0) for n in notes]
-            if any(p < -0.3 for p in pos) and any(p > 0.3 for p in pos):
+            # v11.15e: ±0.3在±9刻度下过窄(几乎任何同押都算跨手); 改为±1.5
+            if any(p < -1.5 for p in pos) and any(p > 1.5 for p in pos):
                 cross_hand += 1
     features['cross_hand_event_count'] = cross_hand
     features['cross_hand_ratio'] = cross_hand / max(simultaneous['event_count'], 1)
@@ -450,21 +456,27 @@ def extract_features(chart_data, speed=1.0):
         hold_end = hold_t + hold_len
         # v11.10 锁手检测: hold长条按住期间的其他音符, 按难度加权 tap>flick>drag
         # 用户: tap(点击,锁手最难) > flick(划动,中等) > drag(零操作,几乎无难度)
+        # v12.5: 扩展 — 按住期间的其他hold开始点也计入锁手(连续接条=换指, 全hold谱如Feeling Blue
+        #        此前hold_lock全0完全失明; hold开始点权重0.8, 自身开始点不计)
         all_lock_tap = 0
         all_lock_flick = 0
         all_lock_drag = 0
+        all_lock_holdstart = 0
         total_disp = 0.0
         max_disp = 0.0
-        lock_t = times[tap_mask | flick_mask | drag_mask]
-        lock_pos = positions[tap_mask | flick_mask | drag_mask]
-        lock_types = types[tap_mask | flick_mask | drag_mask]
+        lock_t = times[tap_mask | flick_mask | drag_mask | hold_mask]
+        lock_pos = positions[tap_mask | flick_mask | drag_mask | hold_mask]
+        lock_types = types[tap_mask | flick_mask | drag_mask | hold_mask]
+        lock_idx_orig = np.where(tap_mask | flick_mask | drag_mask | hold_mask)[0]
         lock_sorted_idx = np.argsort(lock_t)
         lock_t_sorted = lock_t[lock_sorted_idx]
         lock_pos_sorted = lock_pos[lock_sorted_idx]
         lock_types_sorted = lock_types[lock_sorted_idx]
+        lock_orig_sorted = lock_idx_orig[lock_sorted_idx]
 
+        hold_idx_arr = np.where(hold_mask)[0]
         for hi in range(n_hold):
-            left = np.searchsorted(lock_t_sorted, hold_t[hi], side='left')
+            left = np.searchsorted(lock_t_sorted, hold_t[hi] + 1e-9, side='left')  # +ε排除自身开始点
             right = np.searchsorted(lock_t_sorted, hold_end[hi], side='right')
             if right > left:
                 for j in range(left, right):
@@ -472,26 +484,29 @@ def extract_features(chart_data, speed=1.0):
                     if t_ == NOTE_TAP: all_lock_tap += 1
                     elif t_ == NOTE_FLICK: all_lock_flick += 1
                     elif t_ == NOTE_DRAG: all_lock_drag += 1
+                    elif t_ == NOTE_HOLD: all_lock_holdstart += 1
                 disps = np.abs(lock_pos_sorted[left:right] - hold_pos[hi])
                 total_disp += float(np.sum(disps))
                 max_disp = max(max_disp, float(np.max(disps)))
 
         features['hold_lock_tap_events'] = all_lock_tap
         features['hold_lock_tap_events_per_hold'] = all_lock_tap / max(n_hold, 1)
-        # v11.10: 加权锁手分 (tap×1.0 + flick×0.4 + drag×0.1) — 反映锁手实际难度贡献
-        lock_weighted = all_lock_tap * 1.0 + all_lock_flick * 0.4 + all_lock_drag * 0.1
+        # v11.10: 加权锁手分 (tap×1.0 + flick×0.4 + drag×0.1 + hold开始×0.8) — 反映锁手实际难度贡献
+        lock_weighted = all_lock_tap * 1.0 + all_lock_flick * 0.4 + all_lock_drag * 0.1 + all_lock_holdstart * 0.8
         features['hold_lock_weighted'] = lock_weighted
         features['hold_lock_weighted_per_hold'] = lock_weighted / max(n_hold, 1)
         features['hold_lock_weighted_per_sec'] = lock_weighted / max(ds, 0.01)
         features['hold_lock_flick_events'] = all_lock_flick
         features['hold_lock_drag_events'] = all_lock_drag
-        features['hold_lock_avg_displacement'] = total_disp / max(all_lock_tap + all_lock_flick + all_lock_drag, 1)
+        features['hold_lock_holdstart_events'] = all_lock_holdstart  # v12.5: 连续接条锁手
+        features['hold_lock_avg_displacement'] = total_disp / max(all_lock_tap + all_lock_flick + all_lock_drag + all_lock_holdstart, 1)
         features['hold_lock_max_displacement'] = max_disp
         features['hold_lock_displacement_per_sec'] = total_disp / ds
     else:
         features.update({'hold_lock_tap_events': 0, 'hold_lock_tap_events_per_hold': 0,
                          'hold_lock_weighted': 0, 'hold_lock_weighted_per_hold': 0, 'hold_lock_weighted_per_sec': 0,
                          'hold_lock_flick_events': 0, 'hold_lock_drag_events': 0,
+                         'hold_lock_holdstart_events': 0,
                          'hold_lock_avg_displacement': 0, 'hold_lock_max_displacement': 0,
                          'hold_lock_displacement_per_sec': 0})
 
@@ -522,21 +537,39 @@ def extract_features(chart_data, speed=1.0):
             features[f'tap_micro_max_{mw}beat'] = float(sd[0])
             features[f'tap_micro_top5_{mw}beat'] = float(np.mean(sd[:max(5, len(d_tap)//20)]))
 
-    # ====== 红蓝黄交替频率（Tap/Flick/Drag不同种连续切换的认知负荷） ======
+    # ====== 蓝夹红切换频率（v12.6: 改为仅tap/hold(蓝)与flick(红)之间的切换 ======
+    # 依据: 用户 — drag是零操作划动, 参与切换不构成难度; kyou站"蓝夹红"是公认的类型切换难度标签
+    # (原统计所有类型切换, おぎゃり3.93/s大量tap-drag交替虚高)
     if n_notes > 2:
         nts = types.astype(int)
+        blue = (nts == NOTE_TAP) | (nts == NOTE_HOLD)
+        red = nts == NOTE_FLICK
+        # v11.15d修复: 阈值0.5是tick(<4ms@193bpm)几乎永不触发; 改为0.5秒(真实秒)
         switches = 0
+        pair_counts = defaultdict(int)
         for i in range(1, n_notes):
-            if times[i] - times[i-1] < 0.5 and nts[i] != nts[i-1]:
+            gap_sec = (times[i] - times[i-1]) / 32.0 * 60.0 / max(note_bpms[i], 1.0)
+            blue_red = (blue[i-1] and red[i]) or (red[i-1] and blue[i])
+            if gap_sec < 0.5 and blue_red:
                 switches += 1
+                # v12.5: 键型交替对 (无序), 用于衡量"多种键型交替"的多样性 (玩家共识: tap-flick交替等增加难度)
+                pair_counts[tuple(sorted((int(nts[i-1]), int(nts[i]))))] += 1
         features['type_switch_ratio'] = switches / max(n_notes - 1, 1)
         features['type_switch_per_sec'] = switches / ds
+        tp = int(sum(pair_counts.values()))
+        if tp > 0:
+            probs = np.array(list(pair_counts.values()), dtype=float) / tp
+            features['type_switch_pair_entropy'] = float(-np.sum(probs * np.log2(probs)))
+        else:
+            features['type_switch_pair_entropy'] = 0.0
+        features['type_switch_pair_count'] = tp
     else:
-        features.update({'type_switch_ratio': 0, 'type_switch_per_sec': 0})
+        features.update({'type_switch_ratio': 0, 'type_switch_per_sec': 0,
+                         'type_switch_pair_entropy': 0.0, 'type_switch_pair_count': 0})
 
     # ====== Tap纯密度（排除Drag/Flick） ======
     features['tap_notes_per_second'] = n_tap / ds
-    features['tap_notes_per_beat'] = n_tap / max(dt, 0.01)
+    features['tap_notes_per_beat'] = n_tap / db  # v11.15e: 每拍分母(db=dt/32)
 
     # ====== 耐力 ======
     d1 = _density(1)
@@ -600,18 +633,19 @@ def extract_features(chart_data, speed=1.0):
         features['track_section_ratio'] = 0
 
     # ====== 长条特征 ======
-    hold_time_sum = float(np.sum(hold_times))
-    features['total_hold_duration_beats'] = hold_time_sum
+    hold_time_sum = float(np.sum(hold_times))  # 单位tick
+    # v11.15e: holdTime是tick(1拍=32tick), *_beats特征须÷32 (原值大32倍)
+    features['total_hold_duration_beats'] = hold_time_sum / 32.0
     features['total_hold_duration_sec'] = time_to_seconds(hold_time_sum, bpm)
-    features['avg_hold_duration_beats'] = hold_time_sum / max(n_hold, 1)
-    features['max_hold_duration_beats'] = float(np.max(hold_times)) if n_hold > 0 else 0
+    features['avg_hold_duration_beats'] = hold_time_sum / 32.0 / max(n_hold, 1)
+    features['max_hold_duration_beats'] = float(np.max(hold_times)) / 32.0 if n_hold > 0 else 0
     features['hold_duration_ratio'] = hold_time_sum / max(dt, 0.01)
     # v11.7: 长黄键(drag带holdTime, RPE特有) — Feeling Blue类全drag长条谱曾完全失明
     drag_ht = hold_times[drag_mask] if n_notes > 0 else np.array([])
     features['drag_hold_count'] = int(np.sum(drag_ht > 0))
-    features['drag_hold_time_total_beats'] = float(np.sum(drag_ht))
+    features['drag_hold_time_total_beats'] = float(np.sum(drag_ht)) / 32.0  # v11.15e: tick→拍
     features['drag_hold_time_total_sec'] = time_to_seconds(float(np.sum(drag_ht)), bpm)
-    features['drag_hold_avg_beats'] = float(np.mean(drag_ht[drag_ht > 0])) if np.any(drag_ht > 0) else 0.0
+    features['drag_hold_avg_beats'] = float(np.mean(drag_ht[drag_ht > 0])) / 32.0 if np.any(drag_ht > 0) else 0.0
     features['drag_hold_ratio'] = float(np.sum(drag_ht > 0)) / max(n_drag, 1)
     # v11.7b: 纯drag滑动谱 — drag击打密度 (Feeling Blue 820 drag/117s = 7/s)
     features['drag_per_sec'] = n_drag / max(features['duration_sec'], 0.01)
@@ -631,13 +665,15 @@ def extract_features(chart_data, speed=1.0):
 
     # ====== 节奏特征 ======
     if n_notes > 1:
-        intervals = np.diff(times)
-        features['avg_interval_beats'] = float(np.mean(intervals))
-        features['std_interval_beats'] = float(np.std(intervals))
-        features['min_interval_beats'] = float(np.min(intervals))
+        intervals = np.diff(times)  # tick
+        # v11.15e: intervals是tick, *_beats须÷32; 0.25拍=8tick, 0.125拍=4tick (原把tick当拍, 大32倍且阈值只统计同押)
+        features['avg_interval_beats'] = float(np.mean(intervals)) / 32.0
+        features['std_interval_beats'] = float(np.std(intervals)) / 32.0
+        features['min_interval_beats'] = float(np.min(intervals)) / 32.0
         features['interval_cv'] = float(np.std(intervals) / max(np.mean(intervals), 0.001))
-        features['short_interval_ratio'] = float(np.sum(intervals < 0.25) / max(len(intervals), 1))
-        features['very_short_interval_ratio'] = float(np.sum(intervals < 0.125) / max(len(intervals), 1))
+        # 16分=8tick恰为0.25拍, 用<=8纳入; 32分=4tick用<=4且排除同押(0tick, 用户底线: 同押不算分音)
+        features['short_interval_ratio'] = float(np.sum(intervals <= 8) / max(len(intervals), 1))
+        features['very_short_interval_ratio'] = float(np.sum((intervals <= 4) & (intervals > 0)) / max(len(intervals), 1))
     else:
         features.update({'avg_interval_beats': 0, 'std_interval_beats': 0, 'min_interval_beats': 0,
                          'interval_cv': 0, 'short_interval_ratio': 0, 'very_short_interval_ratio': 0})
@@ -729,7 +765,7 @@ def extract_features(chart_data, speed=1.0):
     else:
         features['rhythm_entropy'] = 0
 
-    features['has_AT'] = 1 if n_flick > 0 else 0
+    # v11.15e: 删除 has_AT — 输入无难度标签, "有flick=AT"不成立(IN谱同样大量flick), 特征无信息量且语义错误
 
     if n_notes > 4:
         times_sec = np.array([time_to_seconds(t, max(b, 1.0), bpm_timeline) for t, b in zip(times, note_bpms)])
@@ -880,7 +916,23 @@ def extract_features(chart_data, speed=1.0):
     rcnps = features.get('real_core_notes_per_second', 0)
     above_avg_mean = rcnps  # fallback
     above_avg_ratio = 0.0
-    above_avg_dur = 0
+    above_avg_dur = 0.0
+
+    def _union_len(intervals):
+        """一维区间并集总长 (秒)"""
+        if not intervals:
+            return 0.0
+        intervals = sorted(intervals)
+        total = 0.0
+        cur_s, cur_e = intervals[0]
+        for s, e in intervals[1:]:
+            if s <= cur_e:
+                cur_e = max(cur_e, e)
+            else:
+                total += cur_e - cur_s
+                cur_s, cur_e = s, e
+        return total + (cur_e - cur_s)
+
     if len(core_times) > 5:
         core_idx_all = np.where(core_mask)[0]  # 全局音符索引 (用于取正确BPM)
         t_arr = np.sort(np.array([time_to_seconds(t, max(all_notes[idx].get('bpm', bpm), 1.0), bpm_timeline)
@@ -888,7 +940,7 @@ def extract_features(chart_data, speed=1.0):
         if len(core_notes_times) > 5:
             # 复用 eff 块的排序 (cts_sorted=秒, ctk_sorted=tick)
             eff_ref = float(np.mean(eff_vals)) if eff_vals else rcnps  # eff版阈值
-            left = 0; above_windows = []; above_windows_eff = []
+            left = 0; above_windows = []; above_windows_eff = []; above_intervals = []
             for right in range(len(cts_sorted)):
                 while cts_sorted[right] - cts_sorted[left] > 1.0:
                     left += 1
@@ -900,29 +952,32 @@ def extract_features(chart_data, speed=1.0):
                     eff_count = int(len(seg_tick))
                 if window_tps >= rcnps:
                     above_windows.append(window_tps)
+                    above_intervals.append((max(0.0, cts_sorted[right] - 1.0), cts_sorted[right]))
                 if eff_count >= eff_ref:
                     above_windows_eff.append(eff_count)
             above_avg_mean = float(np.mean(above_windows)) if above_windows else rcnps
             above_avg_mean_eff = float(np.mean(above_windows_eff)) if above_windows_eff else above_avg_mean
             above_avg_ratio = len(above_windows) / max(len(t_arr), 1)
-            above_avg_dur = len(above_windows)
+            # v12: 高潮段总秒数=高潮窗口区间并集 (原len(above_windows)是窗口计数≈音符数, 非秒; xodus实测989>谱长122s)
+            above_avg_dur = _union_len(above_intervals)
         else:
-            left = 0; above_windows = []
+            left = 0; above_windows = []; above_intervals = []
             for right in range(len(t_arr)):
                 while t_arr[right] - t_arr[left] > 1.0:
                     left += 1
                 window_tps = right - left + 1
                 if window_tps >= rcnps:
                     above_windows.append(window_tps)
+                    above_intervals.append((max(0.0, t_arr[right] - 1.0), t_arr[right]))
             above_avg_mean = float(np.mean(above_windows)) if above_windows else rcnps
             above_avg_mean_eff = above_avg_mean
             above_avg_ratio = len(above_windows) / max(len(t_arr), 1)
-            above_avg_dur = len(above_windows)
+            above_avg_dur = _union_len(above_intervals)
     else:
         above_avg_mean_eff = rcnps
     features['above_avg_density_mean'] = above_avg_mean_eff  # v11.2: 有效击打版
     features['above_avg_density_ratio'] = above_avg_ratio
-    features['above_avg_duration_sec'] = above_avg_dur  # 高潮段总持续秒数
+    features['above_avg_duration_sec'] = above_avg_dur  # 高潮段总持续秒数 (v12: 区间并集, 真实秒)
     features['density_dimension'] = float(np.sqrt(max(rcnps, 0.01) * max(above_avg_mean_eff, 0.01)))
 
     # ====== 耐力指标(保留供GB模型219特征使用，不在FLAT_FEATURES中) ======
@@ -960,7 +1015,7 @@ def extract_features(chart_data, speed=1.0):
         core_adj = (core_mask[1:] & core_mask[:-1]) & (intervals_sec > 1e-6)
         features['global_jack_count'] = int(np.sum(core_adj & (intervals_sec < 0.125)))
         features['miniburst_count'] = int(np.sum(core_adj & (intervals_sec < 0.0625)))
-        features['miniburst_density'] = features['miniburst_count'] / max(dt, 0.01)
+        features['miniburst_density'] = features['miniburst_count'] / ds  # v11.15e: 每tick→每秒
 
         # position-aware jack: 同线同位置且间隔 < 100ms
         jack_threshold_sec = 0.10
@@ -992,9 +1047,10 @@ def extract_features(chart_data, speed=1.0):
         pos_diffs_arr = np.abs(np.diff(positions))
         same_line_mask = jl_idx[1:] == jl_idx[:-1]
         its_full = intervals_sec
-        # v11.14: 只算tap+hold且排除多押(0ms); 同线限定保留 (跨线交错非手指速度)
+        # v11.14: 只算tap+hold且排除多押(0ms)
+        # v11.15e: 移除同线过滤 — 用户底线: 跨线快速交替同样反映手指速度/读谱压力(双线对拍是Phigros核心玩法)
         core_adj_full = (core_mask[1:] & core_mask[:-1]) & (intervals_sec > 1e-6)
-        its = intervals_sec[same_line_mask & core_adj_full]
+        its = intervals_sec[core_adj_full]
         features['fast_ms_050_ratio'] = float(np.sum(its < 0.05)) / max(len(its), 1)
         features['fast_ms_100_ratio'] = float(np.sum((its >= 0.05) & (its < 0.10))) / max(len(its), 1)
         features['fast_ms_150_ratio'] = float(np.sum((its >= 0.10) & (its < 0.15))) / max(len(its), 1)
@@ -1086,9 +1142,11 @@ def extract_features(chart_data, speed=1.0):
         jl_idx_arr = np.array([n.get('judge_line_idx', 0) for n in all_notes])
         cur_group = -1
         prev_t = None
+        prev_line = None
         g_sizes, g_times, g_lines, g_bpms = [], [], [], []
         for i in range(n_notes):
-            if prev_t is None or (times[i] - prev_t) >= 4:
+            # v11.15e: 分组同时校验判定线 (原只按时间, 跨线同押被并进同组, 后续"同线连续和弦"判定混入跨线事件)
+            if prev_t is None or (times[i] - prev_t) >= 4 or int(jl_idx_arr[i]) != prev_line:
                 cur_group += 1
                 g_times.append(float(times[i]))
                 g_lines.append(int(jl_idx_arr[i]))
@@ -1097,6 +1155,7 @@ def extract_features(chart_data, speed=1.0):
             else:
                 g_sizes[cur_group] += 1
             prev_t = times[i]
+            prev_line = int(jl_idx_arr[i])
         for g in range(1, len(g_sizes)):
             if (g_lines[g] == g_lines[g-1] and g_sizes[g] >= 2 and g_sizes[g-1] >= 2):
                 gap_sec = (g_times[g] - g_times[g-1]) / 32.0 * 60.0 / max(g_bpms[g-1], 1.0)  # v11.15: 局部bpm直算
@@ -1257,7 +1316,7 @@ def extract_features(chart_data, speed=1.0):
                 i += 1
         features['trill_event_count'] = trill_events
         features['trill_total_steps'] = trill_total_steps
-        features['trill_density'] = trill_total_steps / max(dt, 0.01)
+        features['trill_density'] = trill_total_steps / ds  # v11.15e: 每tick→每秒
     else:
         features.update({'trill_event_count': 0, 'trill_total_steps': 0, 'trill_density': 0})
 
@@ -1287,7 +1346,7 @@ def extract_features(chart_data, speed=1.0):
                 i += 1
         features['jack_event_count'] = jack_events
         features['jack_total_steps'] = jack_total_steps
-        features['jack_density'] = jack_total_steps / max(dt, 0.01)
+        features['jack_density'] = jack_total_steps / ds  # v11.15e: 每tick→每秒
     else:
         features.update({'jack_event_count': 0, 'jack_total_steps': 0, 'jack_density': 0})
 
@@ -1296,9 +1355,10 @@ def extract_features(chart_data, speed=1.0):
     act_pos = positions[act_mask]
     if np.sum(act_mask) > 3:
         n_act = int(np.sum(act_mask))
-        left = np.sum(act_pos < -0.5)
-        right = np.sum(act_pos > 0.5)
-        center = np.sum(np.abs(act_pos) <= 0.5)
+        # v11.15e: positionX±9刻度, ±0.5只覆盖中心10~20%; 三分屏改±3.0
+        left = np.sum(act_pos < -3.0)
+        right = np.sum(act_pos > 3.0)
+        center = np.sum(np.abs(act_pos) <= 3.0)
         features['left_ratio'] = left / max(n_act, 1)
         features['right_ratio'] = right / max(n_act, 1)
         features['center_ratio'] = center / max(n_act, 1)
@@ -1307,7 +1367,8 @@ def extract_features(chart_data, speed=1.0):
         act_t = times[act_mask]
         burst_moves = []
         for i in range(1, n_act):
-            if act_t[i] - act_t[i-1] < 0.5:
+            # v11.15e: 0.5tick≈4ms几乎永不触发; 0.5拍=16tick (与burst窗口_density(0.5)口径一致)
+            if act_t[i] - act_t[i-1] < 16.0:
                 burst_moves.append(abs(act_pos[i] - act_pos[i-1]))
         features['burst_avg_movement'] = float(np.mean(burst_moves)) if burst_moves else 0
         features['burst_max_movement'] = float(np.max(burst_moves)) if burst_moves else 0
@@ -1323,7 +1384,7 @@ def extract_features(chart_data, speed=1.0):
         diffs = np.diff(np.sort(times))
         unique_v, counts = np.unique(np.round(diffs, 3), return_counts=True)
         features['distinct_rhythm_count'] = len(unique_v)
-        features['rhythm_diversity'] = len(unique_v) / max(dt, 0.01)
+        features['rhythm_diversity'] = len(unique_v) / max(dt / 32.0, 0.01)  # v11.15e: 每拍 (节奏种类是拍域概念)
         features['dominant_rhythm_ratio'] = float(np.max(counts) / max(np.sum(counts), 1))
     else:
         features.update({'distinct_rhythm_count': 0, 'rhythm_diversity': 0, 'dominant_rhythm_ratio': 0})
@@ -1332,7 +1393,9 @@ def extract_features(chart_data, speed=1.0):
     if n_notes > 1:
         clutter = 0
         for i in range(1, n_notes):
-            if times[i] - times[i-1] < 0.04 and abs(positions[i] - positions[i-1]) > 0.5:
+            # v11.15d: 0.04tick≈1ms@193bpm错误; 改为真实毫秒(相邻<40ms且位置跳跃)
+            gap_ms = (times[i] - times[i-1]) / 32.0 * 60.0 / max(note_bpms[i], 1.0) * 1000
+            if gap_ms < 40 and abs(positions[i] - positions[i-1]) > 0.5:
                 clutter += 1
         features['note_clutter_count'] = clutter
         features['note_clutter_ratio'] = clutter / max(n_notes, 1)
@@ -1340,9 +1403,12 @@ def extract_features(chart_data, speed=1.0):
         features.update({'note_clutter_count': 0, 'note_clutter_ratio': 0})
 
     # ====== offbeat ======
-    offbeat = int(np.sum(np.abs(times - np.round(times)) > 0.05))
+    # v11.15e: 原按tick整数性判断(官谱time全为整数tick→offbeat恒0/weak恒1);
+    # 改为拍域: 音符距最近整拍点>0.05拍=切分音; 距半拍点<0.05拍=弱拍(upbeat)
+    beats_arr = times / 32.0
+    offbeat = int(np.sum(np.abs(beats_arr - np.round(beats_arr)) > 0.05))
     features['offbeat_ratio'] = offbeat / max(n_notes, 1)
-    weak = int(np.sum(np.abs((times + 0.5) % 1.0 - 0.5) < 0.05))
+    weak = int(np.sum(np.abs((beats_arr + 0.5) % 1.0 - 0.5) < 0.05))
     features['weak_beat_ratio'] = weak / max(n_notes, 1)
 
     # ====== density transition ======
@@ -1355,33 +1421,44 @@ def extract_features(chart_data, speed=1.0):
         features.update({'density_transition_mean': 0, 'density_transition_max': 0, 'density_transition_std': 0})
 
     # ====== 读谱: Phigros判定线视觉干扰 ======
-    # 兼容标准格式(judgeLineMoveEvents)和RPE格式(eventLayers)
+    # v11.15e 重构: 官谱判定线事件是per-tick插值采样(实测1022张官谱平均1.3万move事件/谱),
+    # RPE/PE转换后是keyframe(数百个) — 事件计数密度跨格式不可比(高仿"move=0差100倍"的根源)。
+    # 新增"位移量/秒"特征: 线性插值下采样密度不影响总位移, 官谱/RPE/PE完全可比。
     jline_move_total = 0; jline_rotate_total = 0; jline_disappear_total = 0
+    jline_move_disp = 0.0; jline_rotate_disp = 0.0; jline_hidden_sec = 0.0
     has_above_notes = False; has_below_notes = False
     for line in judge_lines:
-        # 标准格式: 顶层事件
-        jline_move_total += len(line.get('judgeLineMoveEvents', []))
-        jline_rotate_total += len(line.get('judgeLineRotateEvents', []))
-        jline_disappear_total += len(line.get('judgeLineDisappearEvents', []))
-        # RPE格式: eventLayers 嵌套事件
-        for layer in line.get('eventLayers', []):
-            if layer is None: continue
-            jline_move_total += len(layer.get('moveXEvents', [])) + len(layer.get('moveYEvents', []))
-            jline_rotate_total += len(layer.get('rotateEvents', []))
-        # RPE格式: extended 附加事件
-        ext = line.get('extended', {})
-        jline_move_total += len(ext.get('inclineEvents', []))  # 倾角变化≈移动
-        # above/below notes (RPE v3直接用notes, 标准用notesAbove/notesBelow)
+        mevs = line.get('judgeLineMoveEvents', [])
+        revs = line.get('judgeLineRotateEvents', [])
+        devs = line.get('judgeLineDisappearEvents', [])
+        jline_move_total += len(mevs)
+        jline_rotate_total += len(revs)
+        jline_disappear_total += len(devs)
+        for ev in mevs:
+            # v11.15e: 单事件位移clip到[0,5] — 瞬移演出特殊值(官谱实测880520 / RPE±9999px)会污染累计位移
+            dx = min(abs(float(ev.get('end', 0) or 0) - float(ev.get('start', 0) or 0)), 5.0)
+            dy = min(abs(float(ev.get('end2', 0) or 0) - float(ev.get('start2', 0) or 0)), 5.0)
+            jline_move_disp += dx + dy
+        for ev in revs:
+            # v11.15e: 单事件旋转clip到[0,720] — 异常值(官谱实测28800度)不污染
+            jline_rotate_disp += min(abs(float(ev.get('end', 0) or 0) - float(ev.get('start', 0) or 0)), 720.0)
+        # 隐身时长: 官谱disappear值域[0,1], 1=可见/0=消失(PhiChartRender: alpha<=0即隐藏); <0.5视为半透明/隐藏
+        line_bpm = line.get('bpm', bpm) or bpm
+        for ev in devs:
+            if float(ev.get('start', 1) or 1) < 0.5 or float(ev.get('end', 1) or 1) < 0.5:
+                t0 = float(ev.get('startTime', 0) or 0)
+                t1 = float(ev.get('endTime', t0) or t0)
+                jline_hidden_sec += max(t1 - t0, 0.0) / 32.0 * 60.0 / max(line_bpm, 1.0)
+        # above/below notes — v11.15e: 官谱每线都带notesAbove/notesBelow键(空列表也带),
+        # 'is not None'恒真导致above_below_cross恒1.0; 只用非空判断
         if line.get('notesAbove'): has_above_notes = True
         if line.get('notesBelow'): has_below_notes = True
-        # RPE v3: notes数组本身就有above/below混合
-        na_raw = line.get('notesAbove', None)
-        nb_raw = line.get('notesBelow', None)
-        has_above_notes = has_above_notes or (na_raw is not None)
-        has_below_notes = has_below_notes or (nb_raw is not None)
     features['jline_movement_density'] = jline_move_total / max(ds, 0.01)
     features['jline_rotate_density'] = jline_rotate_total / max(ds, 0.01)
     features['jline_disappear_density'] = jline_disappear_total / max(ds, 0.01)
+    features['jline_move_disp_per_sec'] = jline_move_disp / max(ds, 0.01)        # v11.15e: 判定线位移量/秒(跨格式可比)
+    features['jline_rotate_disp_per_sec'] = jline_rotate_disp / max(ds, 0.01)     # v11.15e: 判定线旋转量(度)/秒(跨格式可比)
+    features['jline_hidden_time_ratio'] = jline_hidden_sec / max(ds * max(len(judge_lines), 1), 0.01)  # v11.15e: 隐身时长占比
     # v11.5: 欺诈跨线比 — 判定线几乎不动但音符跨线密集 (3rd Avenue类: 视觉无引导手指要跨)
     features['jline_relative_cross'] = features.get('cross_hand_density', 0) / max(features['jline_movement_density'], 1.0)
     features['above_below_cross'] = 1.0 if has_above_notes and has_below_notes else 0.0
@@ -1429,21 +1506,15 @@ def extract_features(chart_data, speed=1.0):
     if n_notes > 1:
         time_gaps = np.diff(times)
         pos_gaps = np.abs(np.diff(positions))
-        wide = int(np.sum((time_gaps < 0.25) & (pos_gaps > 2.5)))
+        # v11.15d: 0.25tick≈8ms@193bpm错误; 改为真实秒(相邻<0.25s且位移>2.5)
+        gap_secs = time_gaps / 32.0 * 60.0 / np.maximum(note_bpms[1:], 1.0)
+        wide = int(np.sum((gap_secs < 0.25) & (pos_gaps > 2.5)))
         features['wide_jump_count'] = wide
-        features['wide_jump_density'] = wide / max(dt, 0.01)
+        features['wide_jump_density'] = wide / ds  # v11.15e: 每tick→每秒
     else:
         features.update({'wide_jump_count': 0, 'wide_jump_density': 0})
 
     features['visual_complexity'] = float(sum(simultaneous.get('chord_sizes', {}).values()) / max(simultaneous['event_count'], 1)) if simultaneous['event_count'] > 0 else 0
-
-    # ====== position entropy ======
-    if len(positions) > 5:
-        hist, _ = np.histogram(positions, bins=10, range=(-2, 2))
-        prob = hist / max(np.sum(hist), 1)
-        features['position_entropy'] = float(-np.sum(prob * np.log2(prob + 1e-10)))
-    else:
-        features['position_entropy'] = 0
 
     # ====== 位置聚类 & 离轨度（反映谱面是"定轨"还是"散乱"） ======
     if len(positions) > 10:
@@ -1536,7 +1607,7 @@ def extract_features(chart_data, speed=1.0):
                 w_times_beat = times[m]
                 chord_count = 0
                 for k in range(1, n_win):
-                    if w_times_beat[k] - w_times_beat[k-1] < 0.0625:  # 放宽到1/16拍
+                    if w_times_beat[k] - w_times_beat[k-1] < 2.0:  # v11.15e: 1/16拍=2tick (原0.0625tick≈2ms恒不触发)
                         chord_count += 1
                 if chord_count >= n_win * 0.25:
                     seg_labels.append('和弦')
@@ -1614,9 +1685,9 @@ def extract_features(chart_data, speed=1.0):
     if n_notes > 5:
         chord_alt_count = 0
         in_chord = False
-        # 用0.01拍作为同位判定
+        # v11.15d: 同位判定用0.01拍=0.32tick (之前0.02tick=0.0006拍过严)
         for i in range(1, n_notes):
-            if times[i] - times[i-1] < 0.02:
+            if times[i] - times[i-1] < 0.32:
                 if not in_chord:
                     in_chord = True
             else:
@@ -1678,8 +1749,9 @@ def extract_features(chart_data, speed=1.0):
 
     # ====== 位置熵（position entropy — 音符在x轴分布的不均匀度） ======
     if n_notes > 3:
-        # 将x轴分为20个bucket，计算分布熵
-        x_buckets = np.linspace(-1.0, 1.0, 21)
+        # v11.15e: 范围改±9 (positionX实际刻度±9, 原±1把大量音符clip到边缘桶, 熵失真;
+        # 并删除前文range(-2,2)的重复计算)
+        x_buckets = np.linspace(-9.0, 9.0, 21)
         x_indices = np.digitize(positions, x_buckets) - 1
         x_indices = np.clip(x_indices, 0, 19)
         bucket_counts = np.bincount(x_indices, minlength=20)
@@ -1702,11 +1774,11 @@ def extract_features(chart_data, speed=1.0):
         # ① 同线间隔分析 (BPM归一化, 仅核心note)
         fast_16th = 0; fast_32nd = 0; fast_24th = 0; fast_48th = 0; fast_64th = 0; rhythm_counts = {}
         for i, n0 in enumerate(core_notes_v8):
-            line0 = n0.get('judge_line_idx', 0)
             t0_sec = time_to_seconds(n0['time'], max(n0.get('bpm', bpm), 1.0), bpm_timeline)
             for j in range(i + 1, min(i + 50, len(core_notes_v8))):
                 nj = core_notes_v8[j]
-                if nj.get('judge_line_idx', 0) != line0: continue
+                # v11.15e: 移除同线过滤 — 与fast_ms口径一致(用户底线): 跨线交错构成的16/24/32分同样反映手速
+                # (Melodiniq实测: 16分全由双线交错构成, 同线间隔是8分, 同线限定下fast_16th=0)
                 tj_sec = time_to_seconds(nj['time'], max(nj.get('bpm', bpm), 1.0), bpm_timeline)
                 gap_sec = tj_sec - t0_sec
                 if gap_sec <= 0.005: continue
@@ -1739,6 +1811,43 @@ def extract_features(chart_data, speed=1.0):
         features['fast_note_density_64th'] = fast_64th / max(dur, 0.01)
         features['rhythm_type_count'] = len(rhythm_counts)
 
+        # ①b v12.4: 近似分音识别 — 官谱整数tick(1拍=32)写不出奇数分音, 只能近似模拟:
+        #   三连音=10.667tick → 谱师用11/10/11交替(实测官谱1556窗口); 五连音=6.4→6/7; 七连音=4.571→4/5
+        #   识别: k个相邻间隔(tap+hold, 排除同押)总和≈32tick(1拍)且每个≈32/k±1.6tick
+        #   RPE浮点tick可精确表达(10.667→和=32.0), 同样命中 → 跨格式可比
+        odd_tri = odd_quint = odd_sept = 0
+        core_times_sorted_v8 = np.array(sorted(n['time'] for n in core_notes_v8))
+        iv_v8 = np.diff(core_times_sorted_v8)
+        iv_v8 = iv_v8[iv_v8 > 0]
+        i8 = 0
+        while i8 < len(iv_v8):
+            matched_k = None
+            for k, target in [(3, 32.0 / 3.0), (5, 32.0 / 5.0), (7, 32.0 / 7.0)]:
+                if i8 + k <= len(iv_v8):
+                    seg = iv_v8[i8:i8 + k]
+                    if abs(float(np.sum(seg)) - 32.0) <= 2.0 and np.all((seg >= target - 1.6) & (seg <= target + 1.6)):
+                        matched_k = k
+                        break
+            if matched_k == 3:
+                odd_tri += 4
+                i8 += 3
+            elif matched_k == 5:
+                odd_quint += 6
+                i8 += 5
+            elif matched_k == 7:
+                odd_sept += 8
+                i8 += 7
+            else:
+                i8 += 1
+        core_n_v8 = max(len(core_notes_v8), 1)
+        features['triplet_note_count'] = odd_tri
+        features['triplet_ratio'] = odd_tri / core_n_v8
+        features['quintuplet_note_count'] = odd_quint
+        features['quintuplet_ratio'] = odd_quint / core_n_v8
+        features['septuplet_note_count'] = odd_sept
+        features['septuplet_ratio'] = odd_sept / core_n_v8
+        features['odd_division_ratio'] = (odd_tri + odd_quint + odd_sept) / core_n_v8  # 奇数分音(近似)音符占比
+
         # ② 多押分析 (10ms bin, 仅核心note)
         time_bins = {}
         for note in core_notes_v8:
@@ -1755,6 +1864,13 @@ def extract_features(chart_data, speed=1.0):
         features['fast_note_density_64th'] = 0.0
         features['rhythm_type_count'] = 0
         features['avg_chord_size_poly'] = 0.0
+        features['triplet_note_count'] = 0
+        features['triplet_ratio'] = 0.0
+        features['quintuplet_note_count'] = 0
+        features['quintuplet_ratio'] = 0.0
+        features['septuplet_note_count'] = 0
+        features['septuplet_ratio'] = 0.0
+        features['odd_division_ratio'] = 0.0
 
     # 尾杀特征 (末段集中度, 社区"尾杀拉高定数"共识)
     features.update(compute_tail_features(all_notes, judge_lines, bpm_timeline, fallback_bpm))
@@ -1771,7 +1887,7 @@ def compute_track_segments_features(times, positions, fallback_bpm):
     - 主导槽: 槽内音符>=4 (排除边缘噪声)
     - 输出: 4+/5+/6+槽位段的时长、最大槽位数、活跃段平均槽位数
     """
-    out = {'tracks_4plus_sec': 0.0, 'tracks_5plus_sec': 0.0, 'tracks_6plus_sec': 0.0,
+    out = {'tracks_4plus_sec': 0.0, 'tracks_5plus_sec': 0.0, 'tracks_6plus_sec': 0.0, 'tracks_7plus_sec': 0.0,
            'tracks_max_k': 0.0, 'tracks_avg_k': 0.0, 'tracks_active_sec': 0.0}
     n = len(times)
     if n < 6:
@@ -1815,6 +1931,7 @@ def compute_track_segments_features(times, positions, fallback_bpm):
     out['tracks_4plus_sec'] = float((ks_arr >= 4).sum() * WIN)
     out['tracks_5plus_sec'] = float((ks_arr >= 5).sum() * WIN)
     out['tracks_6plus_sec'] = float((ks_arr >= 6).sum() * WIN)
+    out['tracks_7plus_sec'] = float((ks_arr >= 7).sum() * WIN)  # v12.5: 7k+单独档 (玩家共识: 楼梯k数越高权重越大)
     out['tracks_max_k'] = float(ks_arr.max())
     out['tracks_avg_k'] = float(ks_arr.mean())
     out['tracks_active_sec'] = float(active_sec)
@@ -1868,9 +1985,12 @@ def compute_tail_features(all_notes, judge_lines, bpm_timeline, fallback_bpm):
 
 # ====== 底层工具函数 ======
 
-def _compute_window_density(times, window_size):
+def _compute_window_density(times, window_beats):
+    """times单位tick; window_beats单位拍(1拍=32tick)。
+    v11.15e: 原实现把'拍'窗口当tick用(窗口小32倍), 1拍密度实际统计的是1tick窗口(≈最大同押数)。"""
     if times.size == 0:
         return np.array([0])
+    window_size = window_beats * 32.0
     max_t = float(times[-1])
     n_w = max(int(max_t / window_size) + 1, 1)
     bins = np.arange(0, (n_w + 1) * window_size, window_size)

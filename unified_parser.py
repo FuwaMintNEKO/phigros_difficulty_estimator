@@ -9,19 +9,17 @@
 """
 
 import json
-import math
 from predict_rpe import convert_rpe_to_standard
-
-
-# RPE v3 转换参数
-RPEV3_VIRTUAL_LANES = 8        # 虚拟判定线数量
-RPEV3_POSITION_RANGE = (-8, 8)  # 屏幕坐标范围
 
 
 def detect_format(data, raw_text=None):
     """
     检测谱面格式类型。
-    返回: 'pe' | 'rpe' | 'rpe_v3' | 'standard'
+    返回: 'pe' | 'rpe' | 'standard'
+    v11.15e: 移除'rpe_v3'死代码分支 — 原 _is_rpe_v3 检测条件(numOfNotes在判定线顶层/
+    音符在notes数组/事件在eventLayers)与实际RPE结构不匹配恒False, 且按positionX分虚拟线
+    的策略本身错误(愚人节单线谱的多线感来自判定线时间维移动, 非空间分bin)。
+    RPE单线愚人节谱统一走 'rpe' + convert_rpe_to_standard(保留单线结构+正确转换事件)。
     """
     # PE 格式（纯文本）
     if raw_text is not None:
@@ -36,10 +34,6 @@ def detect_format(data, raw_text=None):
     if 'META' in data and 'RPEVersion' in data.get('META', {}):
         return 'rpe'
 
-    # 检查是否为 RPE v3（愚人节单线谱）
-    if _is_rpe_v3(data):
-        return 'rpe_v3'
-
     # 标准官谱/JSON格式
     if 'judgeLineList' in data:
         return 'standard'
@@ -47,127 +41,6 @@ def detect_format(data, raw_text=None):
         return 'standard'
 
     return 'standard'
-
-
-def _is_rpe_v3(data):
-    """
-    判断是否为 RPE v3 愚人节谱：
-    1. 必须带 RPE 导出标记 numOfNotes (官方 Phigros 谱无此字段)
-    2. 必须有 META.RPEVersion (RPE 程序导出必带; 官方谱永远没有)
-    3. 有 judgeLineList
-    4. 存在一条判定线同时满足：notes数 > 800 且有移动/旋转/消失事件
-
-    注: 不能只用"单线音符>800"判断——现代官谱普遍由一条主线承载大部分音符
-        (如 Rrharil AT 主线 1194/1300, 风屿 IN 单线 1156), 会大面积误判。
-        numOfNotes 是 RPE 导出的独有字段, 官方谱 1002 张中仅 5 张含该字段且
-        其主线均 <800 音符。
-    但官方愚人节谱(如 Spasmodic Haocore Mix)也是单线承载大量音符(2500)且
-    带 numOfNotes 字段——必须再叠加 META.RPEVersion 条件: RPE 导出的愚人节
-    谱一定带该标记, 而官方谱(含愚人节谱)永远不会带, 可完全区分二者。
-    """
-    if 'numOfNotes' not in data:
-        return False
-    # 官方谱(含愚人节谱)无 META.RPEVersion; 只有 RPE 导出的谱才可能有 rpe_v3 结构
-    meta = data.get('META') or {}
-    if not meta.get('RPEVersion'):
-        return False
-
-    jls = data.get('judgeLineList', [])
-    if not jls:
-        return False
-
-    for jl in jls:
-        na = len(jl.get('notesAbove', []))
-        nb = len(jl.get('notesBelow', []))
-        n = na + nb
-        if n > 800:
-            has_events = any(k in jl for k in [
-                'judgeLineMoveEvents',
-                'judgeLineDisappearEvents',
-                'judgeLineRotateEvents',
-            ])
-            if has_events:
-                return True
-
-    return False
-
-
-def _convert_rpe_v3_to_standard(data):
-    """
-    将 RPE v3 愚人节单线谱转换为多线标准格式。
-    
-    策略：将所有判定线的notes按positionX均匀分配到 RPEV3_VIRTUAL_LANES 个虚拟线上。
-    """
-    jls = data.get('judgeLineList', [])
-    if not jls:
-        return data
-
-    # 从源判定线取真实BPM
-    source_bpm = 120
-    for jl in jls:
-        b = jl.get('bpm')
-        if b and b > 0:
-            source_bpm = b
-            break
-
-    # 收集所有notes（从所有线中收集，包括有事件和无事件的）
-    all_notes = []
-    for jl in jls:
-        all_notes.extend(jl.get('notesAbove', []))
-        all_notes.extend(jl.get('notesBelow', []))
-
-    if not all_notes:
-        return data
-
-    # 确定positionX的实际范围
-    positions = [n.get('positionX', 0) for n in all_notes]
-    pos_min = min(positions)
-    pos_max = max(positions)
-    pos_range = pos_max - pos_min
-
-    if pos_range < 0.01:
-        # 所有note在同一位置，退化为单线
-        result = {
-            'formatVersion': 3,
-            'offset': data.get('offset', 0),
-            'judgeLineList': [{
-                'bpm': source_bpm,
-                'notesAbove': all_notes,
-                'notesBelow': [],
-                'speedEvents': jls[0].get('speedEvents', []) if jls else [],
-            }]
-        }
-        if 'META' in data:
-            result['META'] = data['META']
-        return result
-
-    # 将positionX范围分成N个虚拟线
-    bin_width = pos_range / RPEV3_VIRTUAL_LANES
-
-    # 初始化虚拟线
-    virtual_lines = []
-    for i in range(RPEV3_VIRTUAL_LANES):
-        virtual_lines.append({
-            'bpm': source_bpm,
-            'notesAbove': [],
-            'notesBelow': [],
-            'speedEvents': [],
-        })
-
-    # 分配notes到虚拟线
-    for note in all_notes:
-        px = note.get('positionX', pos_min)
-        idx = min(RPEV3_VIRTUAL_LANES - 1, max(0, int((px - pos_min) / bin_width)))
-        virtual_lines[idx]['notesAbove'].append(note)
-
-    result = {
-        'formatVersion': 3,
-        'offset': data.get('offset', 0),
-        'judgeLineList': virtual_lines,
-    }
-    if 'META' in data:
-        result['META'] = data['META']
-    return result
 
 
 def load_chart(filepath):
@@ -187,8 +60,6 @@ def load_chart(filepath):
     fmt = detect_format(data)
     if fmt == 'rpe':
         return convert_rpe_to_standard(data)
-    elif fmt == 'rpe_v3':
-        return _convert_rpe_v3_to_standard(data)
     elif fmt == 'standard':
         return data
     else:
@@ -218,9 +89,10 @@ def load_chart_from_bytes(raw_bytes, force_format=None):
         except json.JSONDecodeError:
             raise ValueError('无法解析JSON格式')
     if force_format == 'rpe_v3':
+        # v11.15e: rpe_v3合并进rpe转换(单线+标准事件), 兼容旧调用
         try:
             data = json.loads(text)
-            return _convert_rpe_v3_to_standard(data), None
+            return convert_rpe_to_standard(data), None
         except json.JSONDecodeError:
             raise ValueError('无法解析JSON格式')
     if force_format == 'standard':
@@ -243,8 +115,6 @@ def load_chart_from_bytes(raw_bytes, force_format=None):
     fmt = detect_format(data)
     if fmt == 'rpe':
         return convert_rpe_to_standard(data), None
-    elif fmt == 'rpe_v3':
-        return _convert_rpe_v3_to_standard(data), None
     elif fmt == 'standard':
         return data, None
     else:
@@ -324,7 +194,8 @@ def _parse_pe_format(text):
     bpm = 120.0
     judge_line_count = 0
     EVENT_CMDS = ('n1', 'n2', 'n3', 'n4', 'cp', 'cv', 'cm', 'cr', 'cf', 'ca')
-    bpm_list = []  # bp 行 → BPMList (PE时间单位=拍, 与标准/RPE一致)
+    bpm_list = []  # bp 行 → BPMList
+    K = 32.0       # 拍→ticks (与标准/RPE一致: 1拍=32ticks; v11.15e: 提前定义供bp行转换用)
 
     # 第一遍: 收集 bpm 与最大线号
     for raw in lines:
@@ -337,7 +208,8 @@ def _parse_pe_format(text):
         cmd = parts[0]
         if cmd == 'bp' and len(parts) >= 3:
             bpm = float(parts[2])
-            bpm_list.append({'startTime': float(parts[1]), 'bpm': bpm})
+            # v11.15e: PE bp时间单位是拍, ×K=32转tick (与音符/事件时间轴统一)
+            bpm_list.append({'startTime': float(parts[1]) * K, 'bpm': bpm})
         elif cmd in EVENT_CMDS and len(parts) >= 2:
             judge_line_count = max(judge_line_count, int(parts[1]) + 1)
 
@@ -351,15 +223,19 @@ def _parse_pe_format(text):
 
     # PEC 格式命令 → 官方type: n1=Tap(1) n2=Hold(3) n3=Flick(4) n4=Drag(2)
     pe_type_map = {'n1': 1, 'n2': 3, 'n3': 4, 'n4': 2}
-    PEC_POS_SCALE = 1024.0 / 9.0   # PEC坐标范围±1024 = 官方positionX±9
-    PEC_Y_SCALE = 700.0 / 9.0      # PEC y中心300, 范围±700 → 官方positionY±9
-    K = 32.0                       # 拍→ticks (与标准/RPE一致: 1拍=32ticks)
+    PEC_POS_SCALE = 1024.0 / 9.0   # 音符positionX: PEC坐标±1024 = 官方±9
     cv_events = []                 # (line, time, value) 待合成 speedEvents
 
-    def _move_ev(t0, t1, x, y):
-        return {'startTime': t0 * K, 'endTime': t1 * K,
-                'start': (x - 1024.0) / PEC_POS_SCALE, 'end': (x - 1024.0) / PEC_POS_SCALE,
-                'start2': (y - 300.0) / PEC_Y_SCALE, 'end2': (y - 300.0) / PEC_Y_SCALE}
+    # v11.15e: PE cm命令只有终点坐标(x,y), 起点=该线上一事件的位置(初始=屏幕中心1024,700)
+    # 官谱judgeLineMoveEvents的start/start2值域是[0,1]屏幕比例(0.5=中心), 不是音符的±9刻度!
+    # (权威: PhiChartRender official.ts 'start: e.start - 0.5'; PE画布2048×1400 → x/2048, y/1400)
+    line_pos = {}
+
+    def _x2v(x):
+        return x / 2048.0
+
+    def _y2v(y):
+        return y / 1400.0
 
     for raw in lines:
         raw = raw.strip()
@@ -392,45 +268,59 @@ def _parse_pe_format(text):
             line_idx = int(parts[1])
             if line_idx < judge_line_count:
                 t0, t1 = float(parts[2]), float(parts[3])
+                x, y = float(parts[4]), float(parts[5])
+                px, py = line_pos.get(line_idx, (1024.0, 700.0))
+                # v11.15e: start=前一事件位置, end=本事件终点 (原start=end=x, 位移特征恒0)
                 judge_lines[line_idx]['judgeLineMoveEvents'].append(
-                    _move_ev(t0, t1, float(parts[4]), float(parts[5])))
+                    {'startTime': t0 * K, 'endTime': t1 * K,
+                     'start': _x2v(px), 'end': _x2v(x), 'start2': _y2v(py), 'end2': _y2v(y)})
+                line_pos[line_idx] = (x, y)
         elif cmd == 'cp' and len(parts) >= 5:
             line_idx = int(parts[1])
             if line_idx < judge_line_count:
                 t0 = float(parts[2])
+                x, y = float(parts[3]), float(parts[4])
                 judge_lines[line_idx]['judgeLineMoveEvents'].append(
-                    _move_ev(t0, t0, float(parts[3]), float(parts[4])))
+                    {'startTime': t0 * K, 'endTime': t0 * K,
+                     'start': _x2v(x), 'end': _x2v(x), 'start2': _y2v(y), 'end2': _y2v(y)})
+                line_pos[line_idx] = (x, y)
         elif cmd == 'cr' and len(parts) >= 5:
             line_idx = int(parts[1])
             if line_idx < judge_line_count:
                 t0, t1, ang = float(parts[2]), float(parts[3]), float(parts[4])
+                # v11.15e: 官谱judgeLineRotateEvents单位是度(实测官谱p95=180度; 弧度只在渲染内部),
+                # PE cr角度(-90~900度)直接存度, 不转弧度
                 judge_lines[line_idx]['judgeLineRotateEvents'].append(
                     {'startTime': t0 * K, 'endTime': t1 * K, 'start': ang, 'end': ang})
         elif cmd == 'cf' and len(parts) >= 5:
             line_idx = int(parts[1])
             if line_idx < judge_line_count:
                 t0, t1, alpha = float(parts[2]), float(parts[3]), float(parts[4])
-                hide = 1 if alpha < 128 else 0
+                # v11.15e: 官谱disappear值域[0,1], 1=可见/0=消失(PhiChartRender alphaAnim语义);
+                # PE alpha 0-255(255=不透明) → /255。原 hide=1 if alpha<128 else 0 语义相反(透明时写1)
+                a = max(0.0, min(1.0, alpha / 255.0))
                 judge_lines[line_idx]['judgeLineDisappearEvents'].append(
-                    {'startTime': t0 * K, 'endTime': t1 * K, 'start': hide, 'end': hide})
+                    {'startTime': t0 * K, 'endTime': t1 * K, 'start': a, 'end': a})
         elif cmd == 'ca' and len(parts) >= 4:
             line_idx = int(parts[1])
             if line_idx < judge_line_count:
                 t0, alpha = float(parts[2]), float(parts[3])
-                hide = 1 if alpha < 128 else 0
+                a = max(0.0, min(1.0, alpha / 255.0))
                 judge_lines[line_idx]['judgeLineDisappearEvents'].append(
-                    {'startTime': t0 * K, 'endTime': t0 * K, 'start': hide, 'end': hide})
+                    {'startTime': t0 * K, 'endTime': t0 * K, 'start': a, 'end': a})
         elif cmd == 'cv' and len(parts) >= 4:
             line_idx = int(parts[1])
             if line_idx < judge_line_count:
                 cv_events.append((line_idx, float(parts[2]) * K, float(parts[3])))
 
     # 合成 speedEvents: endTime 取同线下一个 cv 时间, 最后一个向后延伸 4 拍
+    # v12: PE cv值 → 官谱倍率 = cv/10.0 (权威: phira-docs PEC文档 "速度值为float, 默认为10.000")
+    # 原直接存cv原始值(xodus实测median=12)导致note_speed系列特征较官谱虚高13倍
     for line_idx in range(judge_line_count):
         evs = sorted([e for e in cv_events if e[0] == line_idx], key=lambda e: e[1])
         for i, (_, t, sp) in enumerate(evs):
             end_t = evs[i + 1][1] if i + 1 < len(evs) else t + 32.0 * 4
             judge_lines[line_idx]['speedEvents'].append(
-                {'startTime': t, 'endTime': end_t, 'value': sp})
+                {'startTime': t, 'endTime': end_t, 'value': sp / 10.0})
 
     return {'formatVersion': 3, 'BPMList': bpm_list, 'judgeLineList': judge_lines}

@@ -1,43 +1,48 @@
 # ── 分析/调试脚本 ──
 _*.py
 
-# ── 旧版模型 ──
-models/*v5*
-models/*v6*
-models/*v7_1*
-models/*v7.1*
-models/*v7_2*
-models/*v7_4*
-models/*backup*
-models/*ridge*
-models/*_predictions.csv
-
-# ── 测试数据 ──
+# ── 谱面与压缩包(全部不入库) ──
 *.zip
 *.json
+*.pez
+*.npz
 
-# ── 官谱数据（2.3GB，不入库） ──
-data/
+# ── 数据目录(谱面文件大且含版权, 只白名单发布小配置) ──
+data/*
+!data/info/
+data/info/*
+!data/info/difficulty.tsv
+!data/domain_align.json
+!data/community_calib.json
+!data/tag_thresholds.json
+!data/phira/
+data/phira/*
+!data/phira/charts.json
+!data/phira/kyou_tags.json
+!data/phira/ranked_tags.csv
+!data/phira/unranked_tags.csv
+
+# ── 模型: 只发布生产模型与分类器 ──
+models/*
+!models/6dim_model_v12.pkl
+!models/kyou_classifier.pkl
 
 # ── Python缓存 ──
 __pycache__/
 *.pyc
 *.pyo
 
-# ── IDE ──
+# ── IDE / OS ──
 .vscode/
 .idea/
 *.code-workspace
-
-# ── OS ──
 .DS_Store
 Thumbs.db
 
-# ── 团队状态 ──
+# ── 团队状态 / 日志 ──
 .agent-teams/
-
-# ── 实验日志 ──
 logs/
 
-# ── 临时导出 ──
-data/phira/v112_*.csv
+# ── 备份与临时 ──
+app_v*.py
+yume_no_furu.zip

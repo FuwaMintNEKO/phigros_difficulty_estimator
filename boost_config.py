@@ -38,10 +38,17 @@ MANUAL_FLAT = [
     ('movement_density_index',       30.0, 0.060),
     # ===== 耐力 (高潮段秒数) =====
     ('above_avg_duration_sec',       30.0, 0.56),   # v11.13最终: 耐力×1.4
+    # v12.5: 多面/多线下落维度 (用户: Feeling Blue#47264难点在判定线多面运动, 短长条≈蓝键, hold属性本身不难)
+    # 官谱jline位移p95=3.87, FB=5.77/xodus=2.0(单面静态) — 位移活跃区分"多面下落"与"单面多押"
+    # v12.5温和版: 0.25→0.15 (权重过大扰动ranked全局校准平衡, MAE从0.404恶化到0.46)
+    ('jline_move_disp_per_sec',       2.5, 0.06),  # v12.6: 0.15→0.06 (判定线平移演出虚高: Runengon位移17.98/s贡献0.40但用户未判其难; FB靠窄偏置兜底)
+    # v12.5: 全hold域补偿 — 官谱hold_ratio最高0.59(≥0.6的0张), GB学到的hold负关联是官谱巧合;
+    # 用户: 短长条≈蓝键, 击打难度等价, 全hold谱不应被压低 (温和版 0.15→0.08)
+    ('hold_ratio',                    0.40, 0.08),
     # ===== 读谱 (权重降低 ~40%) =====
     ('tempo_change_count',            50.0, 0.028),
     ('rhythm_entropy',                2.5, 0.058),
-    ('type_switch_per_sec',           0.4, 0.100),  # v11.13最终: 类型切换×1.0
+    ('type_switch_per_sec',           0.4, 0.080),  # v12.6: 0.100→0.080 (drag参与的类型切换虚高: おぎゃり3.93含大量drag交替)
     ('note_clutter_ratio',            0.05, 0.032),
     ('density_transition_mean',       0.15, 0.026),
     ('density_transition_std',        0.2, 0.0448), # v11.13最终: 密度波动×0.7
@@ -56,11 +63,16 @@ MANUAL_FLAT = [
     ('jack_max_run',                  2.0, 0.021),  # v11.13最终: 纵连×0.7
     ('same_line_jack_ratio',          0.1, 0.050),
     ('long_jack_count',               4.0, 0.020),
+    # v12.3回滚: global_jack/24th/16th boost权重试验过冲 (cap抹平60137与xodus的24分差异, 三锚全抬);
+    # 双指/多指差异改由app.py类型偏置处理
     # ===== 差速/闪现 (音符级 speed 与 visibleTime; 阈值提高+权重降低, 仅极端差速触发) =====
-    ('note_speed_non1_ratio',         0.20, 0.060),
-    ('note_speed_std',                1.5, 0.060),
-    ('note_speed_max',                4.0, 0.020),
-    ('note_speed_density',            4.0, 0.030),
+    # v12.2: 权重减半 — 变速演出类特征社区共识定价保守 (xodus#294全程高速演出note_speed_non1=0.95
+    # 较Apollo的0.01高130倍但真实难度相当, 原权重贡献+0.42虚高)
+    # v12.4: 再减半 (xodus演出虚高仍未压够)
+    ('note_speed_non1_ratio',         0.20, 0.015),
+    ('note_speed_std',                1.5, 0.015),
+    ('note_speed_max',                4.0, 0.005),
+    ('note_speed_density',            4.0, 0.008),
     ('flash_hold_ratio',              0.1, 0.120),
     # ===== 和弦重键 (chord jack: 同线连续和弦快速重复) =====
     # density 降权 (愚人节多押谱误伤); 3plus_pairs(重键4k) 保留

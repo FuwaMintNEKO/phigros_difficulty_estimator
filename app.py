@@ -9,8 +9,8 @@ from boost_config import MANUAL_FLAT
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v11_10.pkl')
-# v11.7b: 多押分布 + drag滑动密度 + 极端配置特征 + 校准0.55/0.40/0.20
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v12.pkl')
+# v12: v11.15e特征彻查修复(30+处单位/阈值/分音/jline位移量bug)后在v11.13基线上重训
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -26,7 +26,7 @@ LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 # v11.12: 权重统一用 boost_config (手工调优层; 锚点调优后pkl内旧权重作废)
 MANUAL_FLAT = MANUAL_FLAT
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'11.13 (MAE最优: 细校准7段 + 权重重扫(MAE=0.396) + jline P95修正 + 段降权) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'12.0 (v11.15e彻查30+bug + PE-cv/10 + 耐力秒数 + 近似分音识别 + 双指/多指锚点) 全{ m.get("n_train", "?") }官谱'
 
 # ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
 _TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
@@ -163,7 +163,7 @@ MF_FEATS_COND = {'weighted_mf_score_per_sec', 'multi_finger_3plus_events', 'disc
 EFF_FEATS_COND = {'eff_peak_tps_1s', 'eff_avg_tps_1s'}
 DENS_FEATS_COND = {'above_avg_density_mean', 'real_core_notes_per_second'}
 MF3_SCALE_GE30 = 0.50   # 低密度多指谱(堆料型): mf特征系数 (压制OOD外推虚高)
-MF3_SCALE_HIDENS = 0.70 # 高密度多指谱(真材实料): 少压
+MF3_SCALE_HIDENS = 0.60 # v12.2: 高密度多指谱少压→中度压 (xodus#294类多指分摊, 社区定价较物量保守)
 MF3_HIDENS_TH = 9.5     # 新尺度(方案B去冗余)官谱16+段dens P50
 MF3_SCALE_MID = 0.80    # 混合
 EFF_SCALE_LE5 = 1.50    # 双指低密耐力型谱(dens<10): eff特征系数 (抬升)
@@ -180,8 +180,26 @@ ML_HEAVY_DENS = 0.85     # 多面型: 密度特征系数
 EXTREME_FEATS_COND = {'cross_hand_density', 'jline_relative_cross', 'thirtysecond_run_max', 'thirtysecond_run_ratio', 'lane_switch_density'}
 EXTREME_SCALE_DF = 1.30   # 双指谱: 换手/32分交互是AP最难点, 温和拉高
 EXTREME_SCALE_MF = 0.70   # 多指谱: 可分摊, 压低 (校准后多指仍+0.19, 强化抵抗社区虚高)
-# v11.13: 细校准7段 (上架410首MAE最优; 负值=抬升低估段, 正值=压低高估段)
-_CALIB_TABLE = [(12, 13, -0.30), (13, 14, -0.15), (14, 15, 0.05), (15, 16, 0.10), (16, 16.5, 0.10), (16.5, 17, 0.20), (17, 99, 0.05)]
+# v12: 细校准7段 (上架410首非整数定数谱MAE=0.406; 负值=抬升低估段, 正值=压低高估段)
+# v12.2: PE cv单位/10 + above_avg_duration真实秒数修复后重扫; 17+段改为轻抬升(该段无校准低估-0.14)
+_CALIB_TABLE = [(12, 13, -0.15), (13, 14, -0.08), (14, 15, -0.05), (15, 16, 0.04), (16, 16.5, 0.42), (16.5, 17, 0.14), (17, 99, -0.09)]  # v12.15表P: B终优化(低段解锁+社区校准层) MAE0.3887→0.3717
+
+# ===== 社区定数校准层 (v12.12: 分段对齐社区非整数定数, 排除乱标) =====
+# bins: 预测值0.5档 -> adj; 低段/17+半对齐(社区定数乱/膨胀), 16-17锚点密集区豁免(社区低标, 用户锚点已修正)
+_COMM_CALIB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'community_calib.json')
+try:
+    with open(_COMM_CALIB_PATH, encoding='utf-8') as _f:
+        _COMM_CALIB = json.load(_f).get('bins', {})
+except Exception:
+    _COMM_CALIB = {}
+
+
+def _apply_community_calib(p):
+    for _k, _v in _COMM_CALIB.items():
+        _lo_s, _hi_s = _k.split('-')
+        if float(_lo_s) <= p < float(_hi_s):
+            return p + float(_v.get('adj', 0.0))
+    return p
 
 def compute_boost(feats, speed=1.0, is_custom=False):
     """v9.0: 5维纯Boost叠加，无压缩。excess指数随speed线性增加(1x=0.70, 2x=0.85)
@@ -336,23 +354,9 @@ def _level_onehot(level):
     vec[LV_ORDER.index(lv)] = 1.0
     return vec
 
-def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None, chart_name=''):
-    """v10.0: GB残差(含level特征) + 纯Boost叠加 = 最终定数
-    is_custom: True=自制谱(应用密度域对齐), None=自动判定"""
-    if is_custom is None:
-        is_custom = is_custom_chart(chart_data)
-    # v11.3: speed 统一为"改json"行为 — BPM缩放后全量特征(含GB)参与, 阈值不额外缩放;
-    # 档位判定与数值统一用同一特征(无judge机制), wmf堆料档已平滑化
-    if speed != 1.0:
-        chart_data_scaled = apply_speed_multiplier(chart_data, speed)
-        feats = extract_features(chart_data_scaled, speed=1.0)
-    else:
-        feats = extract_features(chart_data, speed=1.0)
-    if not feats:
-        return None, '特征提取失败'
-    if is_custom:
-        feats = apply_domain_align(feats, True, level)
-
+def predict_from_feats(feats, level='IN', is_custom=True):
+    """v12.5统一预测核心: 从(已域对齐的)特征dict → (最终定数, GB, boost, dims, contribs)
+    predict_one_chart 与 CSV导出/统计脚本共用, 避免逻辑分叉(此前导出脚本复刻旧逻辑导致值不一致)"""
     x = np.array([[feats.get(n, 0) for n in FN] + _level_onehot(level)])
     xs = scaler.transform(x)
     p_gb_residual = float(gb.predict(xs)[0])
@@ -364,15 +368,15 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None, chart_n
         _HIGH_TAGS = {'叠键', '多押', '变速', '位移'}
         if 14 < p_final <= 16.5 and sum(1 for t in compute_tags(feats) if t in _HIGH_TAGS) >= 2:
             p_final -= p_boost * 0.08
-        # 后续原逻辑 (hold加成/校准) 沿用 p_final
-        # v11.1: 定轨键盘段加成 (4k/5k/6k: 固定槽位密集击打, 多指分工双指无解; 占比归一化防长谱误伤)
+        # v11.1: 定轨键盘段加成 (4k/5k/6k/7k: 固定槽位密集击打, 多指分工双指无解; k数越高权重越大)
         _act = feats.get('tracks_active_sec', 0)
         if _act > 0:
             _r4 = feats.get('tracks_4plus_sec', 0) / _act
             _r5 = feats.get('tracks_5plus_sec', 0) / _act
             _r6 = feats.get('tracks_6plus_sec', 0) / _act
-            p_final += 0.15 * min(_r4, 0.8) + 0.55 * min(_r5, 0.4) + 1.0 * min(_r6, 0.15)
-        # v11.8c: hold占比加成 (用户实测: 全长条谱难度应略高于同密度tap谱; 相关-0.28系统低估)
+            _r7 = feats.get('tracks_7plus_sec', 0) / _act
+            p_final += 0.15 * min(_r4, 0.8) + 0.55 * min(_r5, 0.4) + 1.0 * min(_r6, 0.15) + 1.6 * min(_r7, 0.10)
+        # v11.8c: hold占比加成 (v12.5回滚保持原阶梯: hold属性本身不难)
         _hr = feats.get('hold_count', 0) / max(feats.get('total_notes', 1), 1)
         if _hr >= 0.6:
             p_final += 0.7
@@ -380,11 +384,95 @@ def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None, chart_n
             p_final += 0.5
         elif _hr >= 0.25:
             p_final += 0.3
-        # v11: 预测时校准 (仅自制谱: 修正社区谱口径 vs 官谱标尺的14-16段OOD高估)
+        # v12.6 类型规则 (官谱模型专用; 恢复版)
+        _mf3t = feats.get('multi_finger_3plus_events', 0)
+        _denst = feats.get('above_avg_density_mean', 0)
+        if _mf3t <= 5 and _denst >= 8.0 and feats.get('odd_division_ratio', 0) >= 0.12:
+            p_final -= 0.03   # 双指真底力修正(仅高奇数分音) [B终优化: -0.08->-0.03]
+        elif _mf3t >= 30:
+            _jmd = feats.get('jline_move_disp_per_sec', 0)
+            _jrd = feats.get('jline_rotate_disp_per_sec', 0)
+            if not (_jmd >= 4.5 or _jrd >= 100.0):
+                p_final -= 0.02   # 单面静态多押分摊 [B终优化: -0.07->-0.02]
+        _mf3r = feats.get('multi_finger_3plus_events', 0)
+        _mf4r = feats.get('multi_finger_4plus_events', 0)
+        _bpmr = feats.get('bpm', 0)
+        _oddr = feats.get('odd_division_ratio', 0)
+        _cart = feats.get('chord_alternation_rate', 0)
+        _movr = feats.get('movement_per_second', 0)
+        _densr = feats.get('above_avg_density_mean', 0)
+        # ① 双指/轻多指物量压 (v12.9b: 加tswitch>=0.3条件 — BonusTime高速无切换16.6不应压)
+        if _mf3r <= 15 and _densr >= 10.0 and _oddr < 0.12 and 170.0 <= _bpmr < 250.0 \
+                and feats.get('type_switch_per_sec', 0) >= 0.3:
+            p_final -= 0.40   # [B终优化: -0.48->-0.40] (v12.13: bpm>=250超高速双指不物量压 — 高仿官谱夢の降る日に误伤)
+        # ①b 高速无切换双指抬 (BonusTime16.6类: 高速但蓝夹红切换少, 蓝夹红改动后boost流失)
+        elif _mf3r <= 15 and _bpmr >= 220 and feats.get('type_switch_per_sec', 0) < 0.3 and _densr >= 10.0:
+            p_final += 0.40   # [B终优化: +0.25->+0.40]
+        # ①c 高速高切换双指抬 (v12.10: Breakcore革命前夜16.6类, 高速蓝夹红真切换; 独立规则不与①互斥)
+        if _mf3r <= 5 and _bpmr >= 230 and feats.get('type_switch_per_sec', 0) >= 1.0 and _densr >= 10.0:
+            p_final += 0.10   # [B终优化: +0.35->+0.10]
+        # ② 切换型多指抬 (v12.9b: 加dens>=8条件 — 茉子の日常dens7.0休闲谱误伤)
+        elif _mf3r >= 30 and _cart >= 2.5 and _bpmr < 170 and 8.0 <= _densr < 13.0:
+            p_final += 0.40   # [B优化: +0.55->+0.40]
+        # ③ 不定轨多押键盘抬 (v12.10: 多面表演型mls>=50不抬 — 八荒类表演多押虚高)
+        elif _mf4r >= 50 and _movr >= 60 and feats.get('multi_line_sim_events', 0) < 50:
+            p_final += 0.50
+        # ④ 多指高难压
+        elif _mf3r >= 80 and feats.get('note_speed_non1_ratio', 0) < 0.5 and _densr >= 12.5 \
+                and (_mf4r >= 30 or _cart >= 3.8 or _densr >= 15.5)                 and not (feats.get('weighted_mf_score_per_sec', 0) >= 35.0 and _mf3r >= 200):
+            p_final -= 0.48   # [B终优化: -0.30->-0.48]
+        # ⑤ 高奇数分音双指压
+        elif _mf3r <= 5 and _oddr >= 0.12 and _densr >= 12.0:
+            p_final -= 0.32   # ⑤ 高奇数分音双指压 [B终优化]
+        # ⑥ 低密长休闲谱压 (茉子の日常15.5类: dens<8长谱蓝夹红后GB抬升; 仅预测>14.5时压, 避免误伤ranked低段)
+        if p_final > 14.5 and _densr < 8.0 and feats.get('duration_sec', 0) >= 90.0 and feats.get('hold_ratio', 0) < 0.85:
+            p_final -= 0.32   # [B终优化: -0.35->-0.32]
+        # ⑦ 表演型多指谱压 (v12.10: 线旋转/位移演出虚高; dens>=15区分Waking类低密表演; mls>=50区分FinalEndGame类单面键盘)
+        _jrd7 = feats.get('jline_rotate_disp_per_sec', 0)
+        _jmd7 = feats.get('jline_move_disp_per_sec', 0)
+        if _mf3r >= 80 and _densr >= 15.0 and (_jrd7 >= 300.0 or _jmd7 >= 8.0):
+            p_final -= 0.80 + (0.20 if _jrd7 >= 400.0 else 0.0)
+        elif _mf3r >= 80 and _jrd7 < 300.0 and feats.get('movement_density_index', 0) >= 700                 and _jmd7 >= 4.5 and feats.get('multi_line_sim_events', 0) >= 50:
+            p_final -= 0.40
+        # ⑧ 静态暴力多指抬 (v12.10: 线静态+高多押+高密度; mf3>=200区分ギザバ怪文書18.3锚点)
+        if feats.get('weighted_mf_score_per_sec', 0) >= 35.0 and _densr >= 15.0                 and _jrd7 < 60.0 and _jmd7 < 3.5 and _mf3r >= 200:
+            p_final += 0.40
+        # ⑨ 中等线活跃表演压 (v12.10: Xaleid#44705类, 7<=jmd<8且jrd>=80且多面, 弱于⑦a的旋转表演)
+        if _mf3r >= 80 and 7.0 <= _jmd7 < 8.0 and _jrd7 >= 80.0                 and feats.get('multi_line_sim_events', 0) >= 50:
+            p_final -= 0.30
+        # ⑩ 静态高切换多押压 (v12.10: Chart_SP#1347类, 线静态+蓝夹红切换多+中密度多押, ④dens12.5边界差0.02)
+        if _mf3r >= 80 and feats.get('type_switch_per_sec', 0) >= 1.2 and _jmd7 < 4.5                 and 10.0 <= _densr < 13.0:
+            p_final -= 0.40
+        # ⑪ 暴力高密度键盘抬 (v12.12: Exitium#50956/ギザバ怪文書类, bpm250+高eff高密度静态线键盘; 与⑧互斥)
+        if _bpmr >= 250.0 and feats.get('eff_peak_tps_1s', 0) >= 32.0 and _densr >= 15.0                 and _jmd7 < 4.0 and _jrd7 < 60.0 and _mf3r >= 50                 and not (feats.get('weighted_mf_score_per_sec', 0) >= 35.0 and _mf3r >= 200):
+            p_final += 0.40
+        # v11: 预测时校准 (仅自制谱)
         for _lo, _hi, _adj in _CALIB_TABLE:
             if _lo < p_final <= _hi:
                 p_final = p_final - _adj
                 break
+        # v12.12: 社区定数校准层 (分段对齐社区非整数定数)
+        p_final = _apply_community_calib(p_final)
+    return p_final, p_gb_residual, p_boost, dims, key_contribs
+
+
+def predict_one_chart(chart_data, speed=1.0, level='IN', is_custom=None, chart_name=''):
+    """v10.0: GB残差(含level特征) + 纯Boost叠加 = 最终定数
+    is_custom: True=自制谱(应用密度域对齐), None=自动判定"""
+    if is_custom is None:
+        is_custom = is_custom_chart(chart_data)
+    # v11.3: speed 统一为"改json"行为 — BPM缩放后全量特征(含GB)参与, 阈值不额外缩放
+    if speed != 1.0:
+        chart_data_scaled = apply_speed_multiplier(chart_data, speed)
+        feats = extract_features(chart_data_scaled, speed=1.0)
+    else:
+        feats = extract_features(chart_data, speed=1.0)
+    if not feats:
+        return None, '特征提取失败'
+    if is_custom:
+        feats = apply_domain_align(feats, True, level)
+
+    p_final, p_gb_residual, p_boost, dims, key_contribs = predict_from_feats(feats, level, is_custom)
 
     feats_display = feats
 
@@ -469,7 +557,7 @@ def predict_one():
             return jsonify({'error': '无法解析谱面格式'}), 400
 
         level = request.args.get('level', 'IN')
-        result, err = predict_one_chart(chart_data, level=level, chart_name=f.filename,
+        result, err = predict_one_chart(chart_data, level=level, chart_name='overlay',
                                         is_custom=is_custom_chart(chart_data, raw_text))
         if result:
             result['source_file'] = 'overlay'
@@ -499,7 +587,7 @@ def predict():
         speed = 1.0
     # 读取 level 参数 (EZ/HD/IN/AT)
     level = request.form.get('level', 'IN')
-    if level.upper() not in LV_ORDER:
+    if level.upper() not in ('EZ', 'HD', 'IN', 'AT'):
         level = 'IN'
 
     results = []

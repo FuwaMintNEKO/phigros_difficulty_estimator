@@ -171,7 +171,7 @@ for i, fn in enumerate(files):
 print(f'\n完成: 成功{ok} 失败{fail} 耗时{(time.time()-t0)/60:.1f}分')
 
 # 写CSV
-out_csv = os.path.join(_ROOT, 'data', 'phira', 'unranked_4star_list.csv')
+out_csv = os.path.join(_ROOT, 'data', 'phira', 'unranked_4star_list_v12.csv')  # v12: 旧文件被占用时用新文件名
 with open(out_csv, 'w', encoding='utf-8-sig', newline='') as f:
     w = csv.writer(f)
     w.writerow(['id', 'name', 'level', 'difficulty', 'rating', 'ratingCount', 'pred', 'gb', 'boost', 'mf3', 'mf4', 'dens', 'eff_avg', 'nps', 'notes'])
