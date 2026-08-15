@@ -49,3 +49,8 @@ logs/
 app_v*.py
 yume_no_furu.zip
 project_memory.md
+
+# ── 截图/旧归档/调试临时 ──
+screenshots/
+model_archive/
+tools/_*
