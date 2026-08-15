@@ -22,13 +22,34 @@
 
 ## 快速开始
 
-    pip install flask numpy scikit-learn pandas
+### Windows
+
+    pip install -r requirements.txt
     python app.py
     # 打开 http://127.0.0.1:5000,拖入谱面 JSON / ZIP 即可
 
-模型文件 models/6dim_model_v12.pkl 已包含在仓库中。
+### Linux
+
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
+    python3 app.py
+    # 打开 http://<服务器IP>:5000 (app.py 默认监听 0.0.0.0)
+
+模型文件 models/6dim_model_v12.pkl 已包含在仓库中,无需额外下载。
 
 > 注意:官谱谱面文件(data/chart/,约 2.3GB)因版权原因**不在仓库内**。自行准备官谱数据后,官谱统计功能才可用;纯预测自制谱不需要官谱文件。社区谱面文件(data/phira/json*/)也不在仓库内,可用 tools/fetch_phira.py 等脚本自行抓取。
+
+## 预计算 CSV(可直接对照查看)
+
+仓库附带最新模型(v12.15)全量预测结果,可直接下载/在线对照:
+
+| 文件 | 内容 | 截止日期 |
+|---|---|---|
+| data/phira/v1215_ranked_predictions.csv | 上架+特殊 589 张(社区定数/预测/偏差/标签/谱型) | 2026-08-16 |
+| data/phira/v1215_unranked_4star_predictions.csv | 未上架 4 星以上 5894 张(社区定数/预测/GB/Boost) | 2026-08-16 |
+
+两文件均为最终版模型与规则跑出的结果,与网页端预测口径一致。tools/export_v129_csv.py 与 tools/export_v129_unranked_full.py 可随时重跑更新。
 
 ## 预测原理
 

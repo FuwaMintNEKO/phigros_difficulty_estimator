@@ -21,6 +21,8 @@ data/phira/*
 !data/phira/kyou_tags.json
 !data/phira/ranked_tags.csv
 !data/phira/unranked_tags.csv
+!data/phira/v1215_ranked_predictions.csv
+!data/phira/v1215_unranked_4star_predictions.csv
 
 # ── 模型: 只发布生产模型与分类器 ──
 models/*
@@ -46,3 +48,4 @@ logs/
 # ── 备份与临时 ──
 app_v*.py
 yume_no_furu.zip
+project_memory.md
