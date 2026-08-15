@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""v12.9 未上架全量预测: json_unranked_4star 5901 首 -> v1210_unranked_4star_predictions.csv
+"""v12.15 未上架全量预测: json_unranked_4star 5901 首 -> v1215_unranked_4star_predictions.csv
 元数据: unranked_4star_list_v12.csv 为主, 缺失 id 用 unranked_all.json 补
 预测口径: app.predict_one_chart (与网页一致), level=AT if diff>=16.5 else IN
 """

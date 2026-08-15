@@ -49,7 +49,7 @@
 | data/phira/v1215_ranked_predictions.csv | 上架+特殊 589 张(社区定数/预测/偏差/标签/谱型) | 2026-08-16 |
 | data/phira/v1215_unranked_4star_predictions.csv | 未上架 4 星以上 5894 张(社区定数/预测/GB/Boost) | 2026-08-16 |
 
-两文件均为最终版模型与规则跑出的结果,与网页端预测口径一致。tools/export_v129_csv.py 与 tools/export_v129_unranked_full.py 可随时重跑更新。
+两文件均为最终版模型与规则跑出的结果,与网页端预测口径一致。tools/export_v1215_csv.py 与 tools/export_v1215_unranked_full.py 可随时重跑更新。
 
 ## 预测原理
 

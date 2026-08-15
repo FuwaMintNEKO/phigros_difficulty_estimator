@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""v12.9 全量预测导出 (生产模型 6dim_model_v12.pkl + 最终规则/表M)
-ranked:  feats_cache_v11.pkl (上架+特殊 615 首, diff>10)  -> v1210_ranked_predictions.csv
-unranked: json_unranked 957 首 (unranked_final_download.json 元数据) -> v1210_unranked_predictions.csv
+"""v12.15 全量预测导出 (生产模型 6dim_model_v12.pkl + 最终规则/校准)
+ranked:  feats_cache_v11.pkl (上架+特殊 615 首, diff>10)  -> v1215_ranked_predictions.csv
+unranked: json_unranked 957 首 (unranked_final_download.json 元数据) -> v1215_unranked_predictions.csv
 统一调用 app.predict_from_feats / app.predict_one_chart, 与网页口径一致。
 """
 import os, sys, json, csv, io, pickle, time
