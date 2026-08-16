@@ -1054,6 +1054,16 @@ def extract_features(chart_data, speed=1.0):
         features['fast_ms_050_ratio'] = float(np.sum(its < 0.05)) / max(len(its), 1)
         features['fast_ms_100_ratio'] = float(np.sum((its >= 0.05) & (its < 0.10))) / max(len(its), 1)
         features['fast_ms_150_ratio'] = float(np.sum((its >= 0.10) & (its < 0.15))) / max(len(its), 1)
+        # v13: 手速负载 (用户想法: 分音数x数量x系数x bpm归一化)
+        # 分音数(音符/拍)=32/tick(16分=4/24分=6/32分=8); x局部bpm = 音符/分钟 = 真实手速
+        # 幂1.5加权让32分比16分贵超线性; 均值/分位数=占比归一, 不混入耐力总量
+        _tick_int = np.maximum(intervals[core_adj_full], 1)
+        _subdiv = 32.0 / _tick_int
+        _bpm_loc = np.maximum(bpm_arr[1:][core_adj_full], 1.0)
+        _ld = (_subdiv ** 1.5) * _bpm_loc
+        features['speed_load_mean'] = float(np.mean(_ld)) if len(_ld) else 0.0
+        features['speed_load_p90'] = float(np.percentile(_ld, 90)) if len(_ld) else 0.0
+        features['speed_load_peak'] = float(np.max(_ld)) if len(_ld) else 0.0
         # 速度归一化交互段: 同线间隔<100ms且位置交替的连续run
         itr = np.zeros(n_notes, dtype=bool)
         for i in range(1, n_notes):
@@ -1876,7 +1886,15 @@ def extract_features(chart_data, speed=1.0):
     features.update(compute_tail_features(all_notes, judge_lines, bpm_timeline, fallback_bpm))
     # v11.1: 定轨键盘段特征 (4k/5k/6k: 固定槽位密集击打, 多指分工, 双指无解)
     features.update(compute_track_segments_features(times, positions, bpm))
-
+    # v13: 非定轨密度 (简单4k堆料型谱Σvreka类: 定轨段密度便宜, 真自由下落贵)
+    _tact = features.get('tracks_active_sec', 0.0)
+    _tdur = features.get('duration_sec', 1.0)
+    _track_ratio = min(_tact / max(_tdur, 1.0), 1.0)
+    features['non_track_density'] = float(features.get('above_avg_density_mean', 0.0) * (1.0 - 0.6 * _track_ratio))
+    # v13: 配置贫瘠度复合 (Σvreka类"简单4k撑密度": 楼梯慢x颤音少x锁手少)
+    _stair = features.get('stair_speed_avg', 0.0)
+    features['stair_x_trill'] = float(_stair * features.get('trill_density', 0.0))
+    features['stair_x_lock'] = float(_stair * features.get('hold_lock_weighted_per_sec', 0.0))
     return features
 
 

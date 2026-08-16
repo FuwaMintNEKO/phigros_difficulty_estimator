@@ -21,12 +21,15 @@ data/phira/*
 !data/phira/kyou_tags.json
 !data/phira/ranked_tags.csv
 !data/phira/unranked_tags.csv
+!data/phira/v130d_ranked_predictions.csv
+!data/phira/v130_unranked_4star_predictions.csv
 !data/phira/v1215_ranked_predictions.csv
 !data/phira/v1215_unranked_4star_predictions.csv
 
 # ── 模型: 只发布生产模型与分类器 ──
 models/*
 !models/6dim_model_v12.pkl
+!models/6dim_model_v13.pkl
 !models/kyou_classifier.pkl
 
 # ── Python缓存 ──

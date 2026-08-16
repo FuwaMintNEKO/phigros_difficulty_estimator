@@ -9,8 +9,9 @@ from boost_config import MANUAL_FLAT
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v12.pkl')
-# v12: v11.15e特征彻查修复(30+处单位/阈值/分音/jline位移量bug)后在v11.13基线上重训
+MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', '6dim_model_v13.pkl')
+V13_MODE = True  # v13: 暂停全部特殊规则①~⑪/手工校准/社区校准/boost条件缩放, 回到最原始GB+Boost
+# v13: 官谱982 + 社区共识17+定数表联合重训
 
 with open(MODEL_PATH, 'rb') as f:
     m = pickle.load(f)
@@ -26,7 +27,7 @@ LV_ORDER = m.get('lv_order', ['EZ', 'HD', 'IN', 'AT'])
 # v11.12: 权重统一用 boost_config (手工调优层; 锚点调优后pkl内旧权重作废)
 MANUAL_FLAT = MANUAL_FLAT
 CAPS = m.get('caps', {})  # boost excess 封顶
-VERSION = f'12.0 (v11.15e彻查30+bug + PE-cv/10 + 耐力秒数 + 近似分音识别 + 双指/多指锚点) 全{ m.get("n_train", "?") }官谱'
+VERSION = f'13.0 (官谱982 + 社区共识17+定数表{ m.get("m17_count", "?") }首联合重训; 原始GB+Boost无规则无校准; v13特征: 非定轨密度/配置贫瘠度/手速负载speed_load) n={ m.get("n_train", "?") }'
 
 # ===== 难点标签 (v11.7玩家研究: 官谱15+特征p75阈值) =====
 _TAG_PATH = os.path.join(os.path.dirname(__file__), 'data', 'tag_thresholds.json')
@@ -265,7 +266,7 @@ def compute_boost(feats, speed=1.0, is_custom=False):
         c = CAPS.get(fname, cap_default)
         if c is not None and e > c:
             e = c
-        if is_custom:
+        if is_custom and not V13_MODE:
             if fname in MF_FEATS_COND:
                 co = co * mf_scale
             elif fname in EFF_FEATS_COND:
@@ -363,7 +364,7 @@ def predict_from_feats(feats, level='IN', is_custom=True):
 
     p_boost, dims, key_contribs = compute_boost(feats, speed=1.0, is_custom=is_custom)
     p_final = p_gb_residual + p_boost
-    if is_custom:
+    if is_custom and not V13_MODE:
         # v11.10: 堆料降权仅中段 (14-16.5; 高难堆料不降, 修复16.5+系统性低估)
         _HIGH_TAGS = {'叠键', '多押', '变速', '位移'}
         if 14 < p_final <= 16.5 and sum(1 for t in compute_tags(feats) if t in _HIGH_TAGS) >= 2:

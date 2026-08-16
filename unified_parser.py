@@ -77,7 +77,15 @@ def load_chart_from_bytes(raw_bytes, force_format=None):
     try:
         text = raw_bytes.decode('utf-8')
     except UnicodeDecodeError:
-        raise ValueError('文件编码不是 UTF-8')
+        # v13: 编码回退 (部分phira谱为GBK, 如#21124業)
+        for _enc in ('gbk', 'cp932', 'latin-1'):
+            try:
+                text = raw_bytes.decode(_enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        else:
+            raise ValueError('文件编码不是 UTF-8 且回退失败')
 
     # 如果手动指定了格式，直接使用
     if force_format == 'pe':

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""v12.15 全量预测导出 (生产模型 6dim_model_v12.pkl + 最终规则/校准)
-ranked:  feats_cache_v11.pkl (上架+特殊 615 首, diff>10)  -> v1215_ranked_predictions.csv
-unranked: json_unranked 957 首 (unranked_final_download.json 元数据) -> v1215_unranked_predictions.csv
+"""v13.0 全量预测导出 (生产模型 6dim_model_v13.pkl, 原始GB+Boost无规则)
+ranked:  feats_cache_v11.pkl (上架+特殊 615 首, diff>10)  -> v130_ranked_predictions.csv
+unranked: json_unranked 957 首 (unranked_final_download.json 元数据) -> v130_unranked_predictions.csv
 统一调用 app.predict_from_feats / app.predict_one_chart, 与网页口径一致。
 """
 import os, sys, json, csv, io, pickle, time
@@ -28,7 +28,7 @@ def export_ranked():
     with open(os.path.join(DATA, 'feats_cache_v11.pkl'), 'rb') as f:
         cache = pickle.load(f)
     ranked = [r for r in cache['ranked'] if r['diff'] and r['diff'] > 10]
-    out = os.path.join(DATA, 'v1215_ranked_predictions.csv')
+    out = os.path.join(DATA, 'v130d_ranked_predictions.csv')
     rows = []
     for r in ranked:
         feats = dict(r['feats'])
@@ -55,7 +55,7 @@ def export_ranked():
 def export_unranked():
     meta = {c['id']: c for c in json.load(open(os.path.join(DATA, 'unranked_final_download.json'), encoding='utf-8'))}
     jdir = os.path.join(DATA, 'json_unranked')
-    out = os.path.join(DATA, 'v1215_unranked_predictions.csv')
+    out = os.path.join(DATA, 'v130d_unranked_predictions.csv')
     rows, fails = [], []
     t0 = time.time()
     for i, fn in enumerate(sorted(os.listdir(jdir))):
